@@ -282,9 +282,13 @@ function M.enter()
   net.send({ t = 'enter', x = mx, y = my, z = mz, yaw = mcYaw })
   -- prime the camera where Steve will appear, so there is no flash
   curSnap = { x = mx, y = my, z = mz, eye = 1.62, at = now, by = mcYaw, hy = mcYaw }
+  -- switch camera first: if it was already ours (e.g. after a Lua reload), switching
+  -- fires our own "camera lost focus" exit, which must not undo this enter
+  core_camera.setByName(0, 'beamcraft', false)
   active = true
   entering = false
-  core_camera.setByName(0, 'beamcraft', false)
+  if lockMouse then lockMouse(true) end
+  pushActionMapHighestPriority('BeamCraft')
   local cam = core_camera.getGlobalCameras and core_camera.getGlobalCameras()['beamcraft']
   if cam then cam.yaw, cam.pitch = yaw, 0 end
   hideBeamNGUi(true)
