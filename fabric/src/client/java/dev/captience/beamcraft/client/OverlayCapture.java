@@ -52,6 +52,8 @@ public final class OverlayCapture {
 	/** Render thread, end of every frame. */
 	public static void afterFrame(RenderTarget target) {
 		if (!BeamCraftClient.HEADLESS || !OverlayServer.hasViewers()) return;
+		// BeamNG's Lua pulls: capture only when it has asked for a frame
+		if (OverlayServer.hasRawViewers() && !OverlayServer.hasWebSocketViewers() && OverlayServer.RAW_REQUESTS.get() <= 0) return;
 		long now = System.nanoTime();
 		if (now - lastCapture < MIN_INTERVAL_NS || IN_FLIGHT.get() >= 3 || ENCODE_QUEUE.get() >= 3) return;
 		GpuTexture tex = target.getColorTexture();
@@ -69,6 +71,7 @@ public final class OverlayCapture {
 		}
 		final GpuBuffer buf = BUFFERS[nextSlot++ % SLOTS];
 		lastCapture = now;
+		if (OverlayServer.RAW_REQUESTS.get() > 0) OverlayServer.RAW_REQUESTS.decrementAndGet();
 		IN_FLIGHT.incrementAndGet();
 		RenderSystem.getDevice().createCommandEncoder().copyTextureToBuffer(tex, buf, 0L, () -> {
 			try (GpuBufferSlice.MappedView view = buf.map(true, false)) {
@@ -101,13 +104,16 @@ public final class OverlayCapture {
 		for (int y = 0; y < h; y++) System.arraycopy(px, (h - 1 - y) * w, cur, y * w, w);
 
 		boolean full = OverlayServer.needFullFrame || prev == null || prevW != w || prevH != h;
+		rawBatch.setLength(0);
 		int[] old = prev;
 		prev = cur;
 		prevW = w;
 		prevH = h;
+		rawBatch.setLength(0);
 		if (full) {
 			OverlayServer.needFullFrame = false;
 			sendRect(cur, w, h, 0, 0, w, h);
+			flushRawBatch();
 			return;
 		}
 		// Changed 32x32 tiles, merged into horizontal runs per tile row: the hand and
@@ -126,6 +132,18 @@ public final class OverlayCapture {
 				}
 			}
 		}
+		flushRawBatch();
+	}
+
+	// one raw message per frame (even an empty one, which tells BeamNG it may ask again):
+	// '[["patch","patch",...]]' - the JS hook's argument list, one array argument
+	private static final StringBuilder rawBatch = new StringBuilder(1 << 20);
+
+	private static void flushRawBatch() {
+		if (!OverlayServer.hasRawViewers()) return;
+		String msg = "[[" + rawBatch + "]]";
+		byte[] raw = msg.getBytes(StandardCharsets.US_ASCII);
+		OverlayServer.broadcastRaw(raw, raw.length);
 	}
 
 	private static boolean tileChanged(int[] cur, int[] old, int w, int x0, int y0, int x1, int y1) {
@@ -178,15 +196,10 @@ public final class OverlayCapture {
 		}
 		if (OverlayServer.hasWebSocketViewers()) OverlayServer.broadcast(o, len);
 		if (OverlayServer.hasRawViewers()) {
-			// already shaped as the JS hook's argument list, so BeamNG's Lua passes it on as-is
-			byte[] head = ("[\"" + w + "," + h + "," + x0 + "," + y0 + "," + rw + "," + rh + "|").getBytes(StandardCharsets.US_ASCII);
-			byte[] enc = Base64.getEncoder().encode(java.util.Arrays.copyOfRange(o, 20, len));
-			byte[] raw = new byte[head.length + enc.length + 2];
-			System.arraycopy(head, 0, raw, 0, head.length);
-			System.arraycopy(enc, 0, raw, head.length, enc.length);
-			raw[raw.length - 2] = '"';
-			raw[raw.length - 1] = ']';
-			OverlayServer.broadcastRaw(raw, raw.length);
+			if (rawBatch.length() > 0) rawBatch.append(',');
+			rawBatch.append('"').append(w).append(',').append(h).append(',').append(x0).append(',').append(y0).append(',')
+				.append(rw).append(',').append(rh).append('|')
+				.append(Base64.getEncoder().encodeToString(java.util.Arrays.copyOfRange(o, 20, len))).append('"');
 		}
 	}
 

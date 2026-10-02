@@ -3,9 +3,12 @@
 -- (raw mode of its overlay server, 127.0.0.1:47802) and hands each one to the UI page
 -- (ui/modModules/beamcraft) untouched, via guihooks.triggerRawJS.
 --
--- Wire format per patch: u32 little-endian length, then ASCII
--- '["fullW,fullH,x,y,w,h|<base64 RGBA>"]' - already the JS hook's argument list, so it
--- is queued for the page without being copied or re-encoded here.
+-- Pull model with end-to-end backpressure: we ask Minecraft for one frame (a byte on
+-- the socket), it answers with one message holding every changed patch of that frame:
+-- u32 little-endian length, then '[["fullW,fullH,x,y,w,h|<base64>", ...]]' - already the
+-- JS hook's argument list, queued for the page as-is. The page acks once it has painted
+-- (beamcraft_main.overlayAck), and only then do we ask for the next frame. Nothing can
+-- pile up anywhere, so the overlay always shows the newest frame BeamNG can keep up with.
 
 local socket = require('socket.socket')
 local sbuf = require('string.buffer')
@@ -20,14 +23,23 @@ local sock
 local inbuf = sbuf.new()
 local need = nil   -- length of the patch being read, once its header has arrived
 local retry = 0
+local waiting = nil -- 'mc' while a frame is requested, 'page' while the page paints
+local waitTime = 0
+M.frames = 0
 
 local function close()
   if sock then pcall(function() sock:close() end) end
   sock = nil
   inbuf:reset()
   need = nil
+  waiting = nil
 end
 M.close = close
+
+-- the page painted the last frame
+function M.ack()
+  if waiting == 'page' then waiting = nil end
+end
 
 local function connect()
   local s = socket.tcp()
@@ -42,6 +54,7 @@ local function connect()
   sock = s
   inbuf:reset()
   need = nil
+  waiting = nil
   return true
 end
 
@@ -74,11 +87,27 @@ function M.update(dt, enabled)
       need = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
     end
     if #inbuf < need then break end
-    local patch = inbuf:get(need)
-    M.patches = M.patches + 1
+    local frame = inbuf:get(need)
     M.bytes = M.bytes + need
     need = nil
-    be:queueHookJS('BeamCraftFrame', patch, 0)
+    M.frames = M.frames + 1
+    if frame ~= '[[]]' then
+      M.patches = M.patches + 1
+      be:queueHookJS('BeamCraftFrame', frame, 0)
+      waiting, waitTime = 'page', 0
+    else
+      waiting = nil -- nothing changed: ask again right away
+    end
+  end
+
+  -- recover if an ack or a frame got lost (e.g. the page reloaded)
+  if waiting then
+    waitTime = waitTime + dt
+    if waitTime > 0.5 then waiting = nil end
+  end
+  if sock and not waiting then
+    sock:send('N')
+    waiting, waitTime = 'mc', 0
   end
 end
 

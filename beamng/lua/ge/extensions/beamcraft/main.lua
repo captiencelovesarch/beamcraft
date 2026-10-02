@@ -75,6 +75,9 @@ local function toast(msg)
   guihooks.trigger('toastrMsg', { type = 'info', title = 'BeamCraft', msg = msg })
 end
 
+-- the overlay page painted a frame: Minecraft may send the next one
+function M.overlayAck() overlay.ack() end
+
 -- mouse/keyboard from the overlay page while a Minecraft screen is open, on to Minecraft
 function M.overlayInput(json)
   local ok, e = pcall(jsonDecode, json)
@@ -534,6 +537,8 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 end
 
 local function onExtensionLoaded()
+  -- a Lua reload can leave our action map pushed (it binds F5, E, 1-9...): drop it
+  popActionMap('BeamCraft')
   -- a reload whose unload failed leaves meshes behind: sweep anything of ours
   local n = 0
   for _, name in ipairs(scenetree.findClassObjects('ProceduralMesh') or {}) do

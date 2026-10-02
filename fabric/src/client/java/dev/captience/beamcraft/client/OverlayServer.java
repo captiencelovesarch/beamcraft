@@ -38,6 +38,12 @@ public final class OverlayServer {
 	 * then ASCII "fullW,fullH,x,y,w,h|<base64 RGBA>".
 	 */
 	private static final CopyOnWriteArrayList<Socket> RAW_CLIENTS = new CopyOnWriteArrayList<>();
+	/**
+	 * Raw clients pull: each byte they send asks for one more frame. Frames are only
+	 * captured when asked for, so nothing piles up if BeamNG's UI paints slower than
+	 * Minecraft renders.
+	 */
+	public static final java.util.concurrent.atomic.AtomicInteger RAW_REQUESTS = new java.util.concurrent.atomic.AtomicInteger();
 	/** Input from the overlay page, for the client thread. */
 	public static final ConcurrentLinkedQueue<JsonObject> INPUT = new ConcurrentLinkedQueue<>();
 	private static volatile boolean started;
@@ -152,9 +158,9 @@ public final class OverlayServer {
 				RAW_CLIENTS.add(s);
 				needFullFrame = true;
 				LOG.info("Overlay raw viewer (BeamNG Lua) connected");
-				// hold the connection open until the peer goes away
+				// every byte is a request for the next frame
 				while (in.read() != -1) {
-					// raw clients don't send anything else
+					RAW_REQUESTS.incrementAndGet();
 				}
 				RAW_CLIENTS.remove(s);
 				LOG.info("Overlay raw viewer disconnected");

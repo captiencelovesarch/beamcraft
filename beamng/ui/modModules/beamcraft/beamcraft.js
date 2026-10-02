@@ -139,8 +139,12 @@ const overlay = new BeamCraftOverlay()
 window.beamcraftOverlay = overlay
 
 window.angular.module('beamcraft', []).run(['$rootScope', function ($rootScope) {
-  // frame patches relayed by Lua: guihooks.triggerRawJS('BeamCraftFrame', '"..."')
-  $rootScope.$on('BeamCraftFrame', (ev, patch) => overlay.onPatch(patch))
+  // one frame's patches relayed by Lua; ack so Lua asks Minecraft for the next one
+  $rootScope.$on('BeamCraftFrame', (ev, patches) => {
+    if (Array.isArray(patches)) for (const p of patches) overlay.onPatch(p)
+    else overlay.onPatch(patches)
+    if (window.bngApi && window.bngApi.engineLua) window.bngApi.engineLua('beamcraft_main.overlayAck()')
+  })
   // visibility/interactivity: guihooks.trigger('BeamCraftOverlay', {visible=, interactive=})
   $rootScope.$on('BeamCraftOverlay', (ev, data) => overlay.setState(data))
 }])
