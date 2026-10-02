@@ -2,12 +2,10 @@
 //
 // The hidden Minecraft renders its HUD, first-person hand, screen effects and every
 // screen (inventory, crafting, chests, chat, death screen) over a transparent
-// background and streams the changed part of each frame to ws://127.0.0.1:47802.
-// This module paints those frames on a full-screen canvas, and while a Minecraft
-// screen is open it sends the mouse and keyboard back, as GLFW events.
-
-const PORT = 47802
-const MAGIC = 0x31464342 // "BCF1" little-endian
+// background. BeamNG's Lua relays the changed part of each frame here (this page
+// can't open network connections itself) as "fullW,fullH,x,y,w,h|<base64 RGBA>";
+// we paint it on a full-screen canvas. While a Minecraft screen is open, mouse and
+// keyboard go back the same way (page -> Lua -> Minecraft) as GLFW events.
 
 // DOM KeyboardEvent.code -> GLFW key code
 const GLFW_KEYS = (() => {
@@ -32,11 +30,17 @@ function mods(e) {
   return (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0)
 }
 
+function toLua(obj) {
+  if (window.bngApi && window.bngApi.engineLua) {
+    window.bngApi.engineLua('beamcraft_main.overlayInput([[' + JSON.stringify(obj) + ']])')
+  }
+}
+
 class BeamCraftOverlay {
   constructor() {
     this.visible = false
     this.interactive = false
-    this.ws = null
+    this.patches = 0
     this.canvas = document.createElement('canvas')
     this.canvas.id = 'beamcraft-overlay'
     Object.assign(this.canvas.style, {
@@ -46,50 +50,29 @@ class BeamCraftOverlay {
     this.ctx = this.canvas.getContext('2d')
     const attach = () => document.body ? document.body.appendChild(this.canvas) : setTimeout(attach, 200)
     attach()
-    this.connect()
     this.bindInput()
   }
 
-  connect() {
-    let ws
-    try {
-      ws = new WebSocket(`ws://127.0.0.1:${PORT}`)
-    } catch (e) {
-      setTimeout(() => this.connect(), 2000)
-      return
-    }
-    ws.binaryType = 'arraybuffer'
-    ws.onopen = () => { this.ws = ws }
-    ws.onmessage = (msg) => this.onFrame(msg.data)
-    ws.onclose = () => {
-      this.ws = null
-      setTimeout(() => this.connect(), 2000)
-    }
-    ws.onerror = () => {}
-  }
-
-  send(obj) {
-    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(obj))
-  }
-
-  onFrame(buf) {
-    if (!(buf instanceof ArrayBuffer) || buf.byteLength < 20) return
-    const dv = new DataView(buf)
-    if (dv.getUint32(0, true) !== MAGIC) return
-    const fullW = dv.getUint16(4, true), fullH = dv.getUint16(6, true)
-    const x = dv.getUint16(8, true), y = dv.getUint16(10, true)
-    const w = dv.getUint16(12, true), h = dv.getUint16(14, true)
+  onPatch(str) {
+    if (typeof str !== 'string') return
+    const bar = str.indexOf('|')
+    if (bar < 0) return
+    const [fullW, fullH, x, y, w, h] = str.substring(0, bar).split(',').map(Number)
     if (this.canvas.width !== fullW || this.canvas.height !== fullH) {
       this.canvas.width = fullW
       this.canvas.height = fullH
       if (x !== 0 || y !== 0 || w !== fullW || h !== fullH) {
-        this.send({ t: 'full' }) // resized under a partial update: ask for a whole frame
+        toLua({ t: 'full' }) // resized under a partial update: ask for a whole frame
         return
       }
     }
-    if (w === 0 || h === 0) return
-    const img = new ImageData(new Uint8ClampedArray(buf, 20, w * h * 4), w, h)
-    this.ctx.putImageData(img, x, y)
+    if (!w || !h) return
+    const bin = atob(str.substring(bar + 1))
+    const n = bin.length
+    const bytes = new Uint8ClampedArray(n)
+    for (let i = 0; i < n; i++) bytes[i] = bin.charCodeAt(i)
+    this.ctx.putImageData(new ImageData(bytes, w, h), x, y)
+    this.patches++
   }
 
   setState(state) {
@@ -113,37 +96,37 @@ class BeamCraftOverlay {
   bindInput() {
     const c = this.canvas
     const swallow = (e) => { e.preventDefault(); e.stopPropagation() }
+    let lastMove = 0
     c.addEventListener('mousemove', (e) => {
       if (!this.interactive) return
+      const now = performance.now()
+      if (now - lastMove < 16) return
+      lastMove = now
       const p = this.pos(e)
-      this.send({ t: 'mm', x: p.x, y: p.y })
+      toLua({ t: 'mm', x: p.x, y: p.y })
     })
-    c.addEventListener('mousedown', (e) => {
+    const button = (e, action) => {
       if (!this.interactive) return
       swallow(e)
       const p = this.pos(e)
-      this.send({ t: 'mb', b: [0, 2, 1][e.button] ?? e.button, a: 1, m: mods(e), x: p.x, y: p.y })
-    })
-    c.addEventListener('mouseup', (e) => {
-      if (!this.interactive) return
-      swallow(e)
-      const p = this.pos(e)
-      this.send({ t: 'mb', b: [0, 2, 1][e.button] ?? e.button, a: 0, m: mods(e), x: p.x, y: p.y })
-    })
+      toLua({ t: 'mb', b: [0, 2, 1][e.button] ?? e.button, a: action, m: mods(e), x: p.x, y: p.y })
+    }
+    c.addEventListener('mousedown', (e) => button(e, 1))
+    c.addEventListener('mouseup', (e) => button(e, 0))
     c.addEventListener('contextmenu', swallow)
     c.addEventListener('wheel', (e) => {
       if (!this.interactive) return
       swallow(e)
-      this.send({ t: 'ms', dx: 0, dy: e.deltaY > 0 ? -1 : e.deltaY < 0 ? 1 : 0 })
+      toLua({ t: 'ms', dx: 0, dy: e.deltaY > 0 ? -1 : e.deltaY < 0 ? 1 : 0 })
     }, { passive: false })
     const onKey = (e, action) => {
       if (!this.interactive) return
       const key = GLFW_KEYS[e.code]
       if (key === undefined) return
       swallow(e)
-      this.send({ t: 'key', k: key, sc: 0, a: e.repeat && action === 1 ? 2 : action, m: mods(e) })
+      toLua({ t: 'key', k: key, sc: 0, a: e.repeat && action === 1 ? 2 : action, m: mods(e) })
       if (action === 1 && e.key && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        this.send({ t: 'ch', c: e.key.codePointAt(0) })
+        toLua({ t: 'ch', c: e.key.codePointAt(0) })
       }
     }
     window.addEventListener('keydown', (e) => onKey(e, 1), true)
@@ -151,15 +134,18 @@ class BeamCraftOverlay {
   }
 }
 
+console.warn('[BeamCraft] overlay module loaded')
 const overlay = new BeamCraftOverlay()
 window.beamcraftOverlay = overlay
 
-// state from Lua: guihooks.trigger('BeamCraftOverlay', {visible=, interactive=})
 window.angular.module('beamcraft', []).run(['$rootScope', function ($rootScope) {
+  // frame patches relayed by Lua: guihooks.triggerRawJS('BeamCraftFrame', '"..."')
+  $rootScope.$on('BeamCraftFrame', (ev, patch) => overlay.onPatch(patch))
+  // visibility/interactivity: guihooks.trigger('BeamCraftOverlay', {visible=, interactive=})
   $rootScope.$on('BeamCraftOverlay', (ev, data) => overlay.setState(data))
 }])
 
-// belt and braces: also poll Lua, in case the event bridge isn't up yet
+// also poll Lua for the state, in case the page loaded after the last push
 setInterval(() => {
   if (window.bngApi && window.bngApi.engineLua) {
     window.bngApi.engineLua('beamcraft_main and beamcraft_main.overlayState and beamcraft_main.overlayState()', (s) => overlay.setState(s))

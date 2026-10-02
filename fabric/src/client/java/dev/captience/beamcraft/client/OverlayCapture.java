@@ -6,6 +6,8 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -23,7 +25,7 @@ import org.slf4j.LoggerFactory;
 public final class OverlayCapture {
 	private static final Logger LOG = LoggerFactory.getLogger("BeamCraft/Overlay");
 	private static final int SLOTS = 3;
-	private static final long MIN_INTERVAL_NS = 14_000_000L; // ~70 fps cap
+	private static final long MIN_INTERVAL_NS = Long.getLong("beamcraft.overlayIntervalMs", 33L) * 1_000_000L; // ~30 fps default
 
 	private static final GpuBuffer[] BUFFERS = new GpuBuffer[SLOTS];
 	private static long bufferSize;
@@ -174,7 +176,15 @@ public final class OverlayCapture {
 				o[p++] = (byte) a;
 			}
 		}
-		OverlayServer.broadcast(o, len);
+		if (OverlayServer.hasWebSocketViewers()) OverlayServer.broadcast(o, len);
+		if (OverlayServer.hasRawViewers()) {
+			byte[] head = (w + "," + h + "," + x0 + "," + y0 + "," + rw + "," + rh + "|").getBytes(StandardCharsets.US_ASCII);
+			byte[] enc = Base64.getEncoder().encode(java.util.Arrays.copyOfRange(o, 20, len));
+			byte[] raw = new byte[head.length + enc.length];
+			System.arraycopy(head, 0, raw, 0, head.length);
+			System.arraycopy(enc, 0, raw, head.length, enc.length);
+			OverlayServer.broadcastRaw(raw, raw.length);
+		}
 	}
 
 	private static void putShort(byte[] o, int at, int v) {

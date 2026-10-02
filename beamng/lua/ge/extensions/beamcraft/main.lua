@@ -21,6 +21,7 @@ local entities = require('beamcraft/entities')
 local vehicles = require('beamcraft/vehicles')
 local mu = require('beamcraft/meshutil')
 local devconsole = require('beamcraft/devconsole')
+local overlay = require('beamcraft/overlay')
 
 M.thirdPerson = false
 
@@ -73,6 +74,12 @@ local function toast(msg)
   guihooks.trigger('toastrMsg', { type = 'info', title = 'BeamCraft', msg = msg })
 end
 
+-- mouse/keyboard from the overlay page while a Minecraft screen is open, on to Minecraft
+function M.overlayInput(json)
+  local ok, e = pcall(jsonDecode, json)
+  if ok and type(e) == 'table' then net.send({ t = 'oin', e = e }) end
+end
+
 -- the overlay page (ui/modModules/beamcraft) asks for this, and gets pushed changes
 function M.overlayState()
   return { visible = active, interactive = active and screenOpen }
@@ -93,6 +100,11 @@ local function setScreenOpen(open)
   screenOpen = open
   if lockMouse then lockMouse(active and not open) end
   if setCEFTyping then setCEFTyping(active and open) end
+  -- our action map binds the mouse buttons to attack/use: while a screen is open the
+  -- clicks belong to the overlay page instead
+  if active then
+    if open then popActionMap('BeamCraft') else pushActionMapHighestPriority('BeamCraft') end
+  end
   input.f, input.b, input.l, input.r = 0, 0, 0, 0
   input.jump, input.sneak, input.sprint, input.attack, input.use = 0, 0, 0, 0, 0
   inputDirty = true
@@ -417,6 +429,7 @@ local function statusLines()
   if net.isConnected() then
     lines[2] = string.format('blocks %d  sections %d  states %d  dirty %d',
       world.getTotalBlocks(), world.getSectionCount(), world.getStateCount(), world.getDirtyCount())
+    lines[4] = string.format('overlay patches %d (%.1f MB)', overlay.patches, overlay.bytes / 1048576)
     lines[3] = string.format('collision %s, last rebuild %s ms (x%d)',
       world.hasPendingCollision() and 'pending' or 'up to date',
       world.lastCollisionMs and string.format('%.0f', world.lastCollisionMs) or '-', world.collisionReloads)
@@ -440,6 +453,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   for i = 1, #msgs do handle(msgs[i]) end
 
   world.update(dtReal)
+  overlay.update(dtReal, active and net.isConnected())
 
   viewportTimer = viewportTimer + dtReal
   if viewportTimer > 1 and net.isConnected() then
@@ -521,6 +535,7 @@ local function onExtensionUnloaded()
   entities.clear()
   player.destroy()
   net.close('extension unloaded')
+  overlay.close()
   devconsole.close()
 end
 

@@ -32,6 +32,12 @@ public final class OverlayServer {
 	private static final String GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 	private static final CopyOnWriteArrayList<Client> CLIENTS = new CopyOnWriteArrayList<>();
+	/**
+	 * Raw clients (BeamNG's Lua): BeamNG's Chromium can't reach the network, so Lua reads
+	 * frames here and hands them to its UI page. Each frame: u32 little-endian length,
+	 * then ASCII "fullW,fullH,x,y,w,h|<base64 RGBA>".
+	 */
+	private static final CopyOnWriteArrayList<Socket> RAW_CLIENTS = new CopyOnWriteArrayList<>();
 	/** Input from the overlay page, for the client thread. */
 	public static final ConcurrentLinkedQueue<JsonObject> INPUT = new ConcurrentLinkedQueue<>();
 	private static volatile boolean started;
@@ -74,7 +80,34 @@ public final class OverlayServer {
 	}
 
 	public static boolean hasViewers() {
+		return !CLIENTS.isEmpty() || !RAW_CLIENTS.isEmpty();
+	}
+
+	public static boolean hasWebSocketViewers() {
 		return !CLIENTS.isEmpty();
+	}
+
+	public static boolean hasRawViewers() {
+		return !RAW_CLIENTS.isEmpty();
+	}
+
+	public static void broadcastRaw(byte[] ascii, int len) {
+		for (Socket s : RAW_CLIENTS) {
+			try {
+				synchronized (s) {
+					OutputStream out = s.getOutputStream();
+					out.write(new byte[] {(byte) len, (byte) (len >>> 8), (byte) (len >>> 16), (byte) (len >>> 24)});
+					out.write(ascii, 0, len);
+					out.flush();
+				}
+			} catch (IOException e) {
+				RAW_CLIENTS.remove(s);
+				try {
+					s.close();
+				} catch (IOException ignored) {
+				}
+			}
+		}
 	}
 
 	public static synchronized void start() {
@@ -111,9 +144,28 @@ public final class OverlayServer {
 	private static void serve(Socket s) {
 		Client client = null;
 		try {
-			InputStream in = s.getInputStream();
-			String key = readHandshake(in);
+			InputStream in = new java.io.BufferedInputStream(s.getInputStream());
+			in.mark(8);
+			byte[] magic = new byte[5];
+			int got = in.readNBytes(magic, 0, 5);
+			if (got == 5 && new String(magic, StandardCharsets.ISO_8859_1).equals("BCRAW")) {
+				RAW_CLIENTS.add(s);
+				needFullFrame = true;
+				LOG.info("Overlay raw viewer (BeamNG Lua) connected");
+				// hold the connection open until the peer goes away
+				while (in.read() != -1) {
+					// raw clients don't send anything else
+				}
+				RAW_CLIENTS.remove(s);
+				LOG.info("Overlay raw viewer disconnected");
+				s.close();
+				return;
+			}
+			in.reset();
+			String[] request = new String[1];
+			String key = readHandshake(in, request);
 			if (key == null) {
+				LOG.warn("Overlay handshake without a WebSocket key:\n{}", request[0]);
 				s.close();
 				return;
 			}
@@ -129,7 +181,7 @@ public final class OverlayServer {
 			LOG.info("Overlay viewer connected");
 			readFrames(client, new DataInputStream(in));
 		} catch (Exception e) {
-			// connection dropped
+			if (client == null) LOG.warn("Overlay handshake failed", e);
 		} finally {
 			if (client != null) CLIENTS.remove(client);
 			try {
@@ -140,7 +192,7 @@ public final class OverlayServer {
 		}
 	}
 
-	private static String readHandshake(InputStream in) throws IOException {
+	private static String readHandshake(InputStream in, String[] request) throws IOException {
 		// read header bytes up to \r\n\r\n without buffering past it
 		StringBuilder sb = new StringBuilder();
 		int c;
@@ -150,6 +202,7 @@ public final class OverlayServer {
 			int n = sb.length();
 			if (n >= 4 && sb.charAt(n - 4) == '\r' && sb.charAt(n - 3) == '\n' && sb.charAt(n - 2) == '\r' && sb.charAt(n - 1) == '\n') break;
 		}
+		request[0] = sb.toString();
 		BufferedReader r = new BufferedReader(new InputStreamReader(new java.io.ByteArrayInputStream(sb.toString().getBytes(StandardCharsets.ISO_8859_1))));
 		String line;
 		while ((line = r.readLine()) != null) {

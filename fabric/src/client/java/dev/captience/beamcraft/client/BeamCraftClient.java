@@ -241,6 +241,7 @@ public class BeamCraftClient implements ClientModInitializer {
 			}
 			case "give" -> giveToSelected(mc, m.get("id").getAsString());
 			case "viewport" -> applyViewport(mc, m.get("vw").getAsInt(), m.get("vh").getAsInt());
+			case "oin" -> OverlayServer.INPUT.add(m.getAsJsonObject("e")); // overlay input relayed by BeamNG's Lua
 			case "hurt" -> onHurt(mc, m);
 			case "veh" -> {
 				java.util.List<net.minecraft.world.phys.AABB> boxes = new java.util.ArrayList<>();
