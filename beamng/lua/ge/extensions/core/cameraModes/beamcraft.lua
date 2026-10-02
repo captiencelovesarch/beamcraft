@@ -80,6 +80,8 @@ function C:update(data)
     if d and d < 4 then camPos = self.pos - fwd * math.max(0.3, d - 0.2) end
   end
 
+  if bc and bc.updateFirstPerson then bc.updateFirstPerson(self.pos, self.yaw, self.pitch, dt) end
+
   data.res.pos:set(camPos)
   data.res.rot = quatFromDir(fwd, up)
   data.res.fov = self.fov

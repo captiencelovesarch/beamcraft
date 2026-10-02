@@ -84,6 +84,13 @@ public class BeamCraftClient implements ClientModInitializer {
 	private final Set<Integer> sentStates = new HashSet<>();
 	private String lastHud = "";
 	private boolean awaitTerrain;
+	private double[] enterTarget;
+	private int awaitTicks;
+	private boolean guiSent;
+	private Path iconsDir;
+	private String iconsUrl;
+	private java.util.Iterator<String> iconBacklog;
+	private boolean entsWereSent;
 
 	// input from BeamNG
 	private double inF, inB, inL, inR;
@@ -148,6 +155,8 @@ public class BeamCraftClient implements ClientModInitializer {
 				lastHud = "";
 				atlasSent = false;
 				readySent = false;
+				guiSent = false;
+				entsWereSent = false;
 			}
 			case "_disconnect" -> {
 				release(mc);
@@ -180,6 +189,16 @@ public class BeamCraftClient implements ClientModInitializer {
 				}
 			}
 			case "give" -> giveToSelected(mc, m.get("id").getAsString());
+			case "hurt" -> onHurt(mc, m);
+			case "veh" -> {
+				java.util.List<net.minecraft.world.phys.AABB> boxes = new java.util.ArrayList<>();
+				for (JsonElement e : m.getAsJsonArray("b")) {
+					JsonArray a = e.getAsJsonArray();
+					boxes.add(new net.minecraft.world.phys.AABB(a.get(0).getAsDouble(), a.get(1).getAsDouble(), a.get(2).getAsDouble(),
+						a.get(3).getAsDouble(), a.get(4).getAsDouble(), a.get(5).getAsDouble()));
+				}
+				TerrainColumns.setVehicleBoxes(boxes);
+			}
 			default -> LOG.debug("Unknown message {}", t);
 		}
 	}
@@ -187,14 +206,15 @@ public class BeamCraftClient implements ClientModInitializer {
 	private void onHello(Minecraft mc, JsonObject m) {
 		beamLevel = m.has("level") ? m.get("level").getAsString() : "none";
 		if (m.has("userPath")) userPath = Path.of(m.get("userPath").getAsString());
-		desiredWorld = worldIdFor(beamLevel);
+		// BeamNG's main menu has no level: no world either, so nothing can fall into the void
+		desiredWorld = beamLevel.isEmpty() || beamLevel.equals("none") ? null : worldIdFor(beamLevel);
 		readySent = false;
 		LOG.info("BeamNG hello: level {}, userfolder {}", beamLevel, userPath);
 
 		JsonObject w = new JsonObject();
 		w.addProperty("t", "welcome");
 		w.addProperty("mc", SharedConstants.getCurrentVersion().name());
-		w.addProperty("world", desiredWorld);
+		if (desiredWorld != null) w.addProperty("world", desiredWorld);
 		Bridge.send(w);
 		sendItemList();
 	}
@@ -216,9 +236,11 @@ public class BeamCraftClient implements ClientModInitializer {
 		haveLook = true;
 		controlling = true;
 		awaitTerrain = true;
+		awaitTicks = 0;
+		enterTarget = new double[] {x, y, z, yaw};
 		p.setNoGravity(true);
-		String name = p.getGameProfile().name();
-		runServerCommand(mc, String.format(Locale.ROOT, "tp %s %.3f %.3f %.3f %.2f 0", name, x, y, z, yaw));
+		p.setDeltaMovement(0, 0, 0);
+		teleport(mc, p, x, y, z, yaw);
 		LOG.info("Entered BeamCraft at {} {} {}", x, y, z);
 	}
 
@@ -283,7 +305,15 @@ public class BeamCraftClient implements ClientModInitializer {
 
 	private void applyInput(Minecraft mc) {
 		LocalPlayer p = mc.player;
-		if (p == null || !controlling) return;
+		if (p == null) return;
+		if (!controlling) {
+			// nobody is playing Steve: keep him exactly where he is, no falling into the void
+			p.setNoGravity(true);
+			p.setDeltaMovement(0, 0, 0);
+			p.fallDistance = 0;
+			return;
+		}
+		if (!awaitTerrain && p.isNoGravity()) p.setNoGravity(false);
 		Options o = mc.options;
 		o.keyUp.setDown(inF > 0.5);
 		o.keyDown.setDown(inB > 0.5);
@@ -300,15 +330,28 @@ public class BeamCraftClient implements ClientModInitializer {
 			p.yRotO = p.getYRot();
 			p.xRotO = p.getXRot();
 		}
-		// hold Steve in place until BeamNG has told us what is under his feet
+		// hold Steve in place until he is where BeamNG put him and BeamNG has told us
+		// what is under his feet
 		if (awaitTerrain) {
-			if (TerrainColumns.hasGroundAt(p.getX(), p.getZ()) && TerrainColumns.size() > 50) {
+			p.setDeltaMovement(0, 0, 0);
+			awaitTicks++;
+			double[] t = enterTarget;
+			boolean arrived = t == null || p.distanceToSqr(t[0], t[1], t[2]) < 0.25;
+			if (!arrived && awaitTicks % 10 == 0) teleport(mc, p, t[0], t[1], t[2], (float) t[3]);
+			Float h = TerrainColumns.heightAt(p.getX(), p.getZ());
+			boolean groundUnderFeet = h != null && h > TerrainColumns.NONE + 1 && h <= p.getY() + 0.6 && h >= p.getY() - 1.5;
+			boolean loaded = mc.getConnection() != null && mc.getConnection().hasClientLoaded();
+			if (arrived && loaded && TerrainColumns.size() > 50 && (groundUnderFeet || awaitTicks > 100)) {
 				awaitTerrain = false;
+				enterTarget = null;
 				p.setNoGravity(false);
-			} else {
-				p.setDeltaMovement(0, 0, 0);
 			}
 		}
+	}
+
+	private void teleport(Minecraft mc, LocalPlayer p, double x, double y, double z, float yaw) {
+		p.snapTo(x, y, z, yaw, 0f);
+		runServerCommand(mc, String.format(Locale.ROOT, "tp %s %.3f %.3f %.3f %.2f 0", p.getGameProfile().name(), x, y, z, yaw));
 	}
 
 	private void release(Minecraft mc) {
@@ -330,10 +373,12 @@ public class BeamCraftClient implements ClientModInitializer {
 		manageWorld(mc);
 		if (!Bridge.isConnected()) return;
 		manageAtlas(mc);
+		manageGui(mc);
 		LocalPlayer p = mc.player;
 		if (p != null && currentWorld != null) {
 			sendPose(mc, p);
 			sendHud(mc, p);
+			sendEntities(mc, p);
 		}
 		flushBlocks();
 	}
@@ -346,7 +391,22 @@ public class BeamCraftClient implements ClientModInitializer {
 			.append(",\"yaw\":").append(r4(p.getYRot()))
 			.append(",\"pitch\":").append(r4(p.getXRot()))
 			.append(",\"eye\":").append(r4(p.getEyeHeight()))
-			.append(",\"g\":").append(p.onGround() ? 1 : 0);
+			.append(",\"g\":").append(p.onGround() ? 1 : 0)
+			.append(",\"by\":").append(r4(p.yBodyRot))
+			.append(",\"hy\":").append(r4(p.yHeadRot))
+			.append(",\"lp\":").append(r4(p.walkAnimation.position(1f)))
+			.append(",\"ls\":").append(r4(p.walkAnimation.speed(1f)))
+			.append(",\"sw\":").append(r4(p.getAttackAnim(1f)))
+			.append(",\"cr\":").append(p.isCrouching() ? 1 : 0);
+		ItemStack held = p.getMainHandItem();
+		if (!held.isEmpty()) {
+			String hid = BuiltInRegistries.ITEM.getKey(held.getItem()).toString();
+			sb.append(",\"held\":\"").append(hid).append('"');
+			if (iconsDir != null) GuiExport.ensureIcon(mc, iconsDir, hid);
+			if (held.getItem() instanceof BlockItem bi && bi.getBlock().defaultBlockState().isSolidRender()) {
+				sb.append(",\"hs\":").append(stateForBeamNG(Block.getId(bi.getBlock().defaultBlockState())));
+			}
+		}
 		HitResult hr = mc.hitResult;
 		if (hr instanceof BlockHitResult bhr && hr.getType() == HitResult.Type.BLOCK && mc.level != null
 			&& !mc.level.getBlockState(bhr.getBlockPos()).isAir()) {
@@ -366,7 +426,9 @@ public class BeamCraftClient implements ClientModInitializer {
 		for (int i = 0; i < 9; i++) {
 			ItemStack st = inv.getItem(i);
 			JsonObject it = new JsonObject();
-			it.addProperty("id", BuiltInRegistries.ITEM.getKey(st.getItem()).toString());
+			String iid = BuiltInRegistries.ITEM.getKey(st.getItem()).toString();
+			it.addProperty("id", iid);
+			if (iconsDir != null && !st.isEmpty()) GuiExport.ensureIcon(mc, iconsDir, iid);
 			it.addProperty("n", st.getCount());
 			bar.add(it);
 		}
@@ -374,6 +436,10 @@ public class BeamCraftClient implements ClientModInitializer {
 		h.addProperty("hp", Math.round(p.getHealth() * 10f) / 10f);
 		h.addProperty("food", p.getFoodData().getFoodLevel());
 		h.addProperty("gm", mc.gameMode != null ? mc.gameMode.getPlayerMode().getName() : "survival");
+		h.addProperty("xp", Math.round(p.experienceProgress * 100f) / 100f);
+		h.addProperty("lvl", p.experienceLevel);
+		h.addProperty("air", p.getAirSupply());
+		h.addProperty("armor", p.getArmorValue());
 		String s = h.toString();
 		if (!s.equals(lastHud)) {
 			lastHud = s;
@@ -462,15 +528,130 @@ public class BeamCraftClient implements ClientModInitializer {
 		}
 	}
 
+	/** Block state id BeamNG can draw, sending its definition first if needed. */
+	private int stateForBeamNG(int id) {
+		if (export != null && sentStates.add(id)) {
+			JsonObject d = new JsonObject();
+			d.addProperty("t", "states");
+			JsonArray defs = new JsonArray();
+			defs.add(export.stateDef(id));
+			d.add("d", defs);
+			Bridge.send(d);
+		}
+		return id;
+	}
+
+	/** Items, falling blocks, primed TNT, xp and mobs near Steve, so BeamNG can draw them. */
+	private void sendEntities(Minecraft mc, LocalPlayer p) {
+		if (mc.level == null) return;
+		StringBuilder sb = new StringBuilder("{\"t\":\"ents\",\"l\":[");
+		int n = 0;
+		for (net.minecraft.world.entity.Entity e : mc.level.getEntities(p, p.getBoundingBox().inflate(64))) {
+			String kind;
+			String extra;
+			if (e instanceof net.minecraft.world.entity.item.ItemEntity ie) {
+				kind = "i";
+				extra = '"' + BuiltInRegistries.ITEM.getKey(ie.getItem().getItem()).toString() + '"';
+				if (iconsDir != null) GuiExport.ensureIcon(mc, iconsDir, BuiltInRegistries.ITEM.getKey(ie.getItem().getItem()).toString());
+			} else if (e instanceof net.minecraft.world.entity.item.FallingBlockEntity fb) {
+				kind = "b";
+				extra = Integer.toString(stateForBeamNG(Block.getId(fb.getBlockState())));
+			} else if (e instanceof net.minecraft.world.entity.item.PrimedTnt tnt) {
+				kind = "b";
+				extra = Integer.toString(stateForBeamNG(Block.getId(tnt.getBlockState())));
+			} else if (e instanceof net.minecraft.world.entity.ExperienceOrb) {
+				kind = "x";
+				extra = "0";
+			} else if (e instanceof net.minecraft.world.entity.LivingEntity) {
+				kind = "m";
+				extra = '"' + BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).toString() + '"';
+			} else {
+				continue;
+			}
+			if (n++ > 0) sb.append(',');
+			sb.append('[').append(e.getId()).append(",\"").append(kind).append("\",")
+				.append(r4(e.getX())).append(',').append(r4(e.getY())).append(',').append(r4(e.getZ())).append(',')
+				.append(r4(e.getYRot())).append(',').append(r4(e.getBbWidth())).append(',').append(r4(e.getBbHeight())).append(',')
+				.append(extra).append(']');
+		}
+		if (n == 0 && !entsWereSent) return;
+		entsWereSent = n > 0;
+		Bridge.sendLine(sb.append("]}").toString());
+	}
+
+	/** A BeamNG vehicle hit Steve: knock him back and hurt him (creative ignores the damage). */
+	private void onHurt(Minecraft mc, JsonObject m) {
+		LocalPlayer p = mc.player;
+		if (p == null) return;
+		p.setDeltaMovement(p.getDeltaMovement().add(num(m, "vx") / 20.0, num(m, "vy") / 20.0, num(m, "vz") / 20.0));
+		float dmg = (float) num(m, "dmg");
+		MinecraftServer server = mc.getSingleplayerServer();
+		if (server == null || dmg <= 0) return;
+		java.util.UUID uuid = p.getUUID();
+		server.execute(() -> {
+			net.minecraft.server.level.ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
+			if (sp == null) return;
+			net.minecraft.server.level.ServerLevel lvl = sp.level();
+			var type = lvl.registryAccess().lookupOrThrow(Registries.DAMAGE_TYPE)
+				.getOrThrow(ResourceKey.create(Registries.DAMAGE_TYPE, Identifier.fromNamespaceAndPath("beamcraft", "vehicle")));
+			sp.hurtServer(lvl, new net.minecraft.world.damagesource.DamageSource(type), dmg);
+		});
+	}
+
+	/** HUD sprites, font, skin; then every item icon a few per tick for the picker. */
+	private void manageGui(Minecraft mc) {
+		if (export == null || userPath == null || !atlasSent) return;
+		if (!guiSent) {
+			guiSent = true;
+			try {
+				Path guiDir = userPath.resolve("beamcraft").resolve("gui");
+				Bridge.send(GuiExport.writeHud(mc, guiDir, export.hash()));
+			} catch (Exception e) {
+				LOG.error("GUI export failed", e);
+			}
+			iconsDir = userPath.resolve("beamcraft").resolve("icons").resolve(export.hash());
+			iconsUrl = "/beamcraft/icons/" + export.hash();
+			JsonObject ic = new JsonObject();
+			ic.addProperty("t", "icons");
+			ic.addProperty("dir", iconsUrl);
+			ic.addProperty("done", false);
+			Bridge.send(ic);
+			iconBacklog = GuiExport.allItemIds().iterator();
+		}
+		if (iconBacklog != null) {
+			long until = System.nanoTime() + 8_000_000L; // 8 ms per tick
+			while (iconBacklog.hasNext() && System.nanoTime() < until) GuiExport.ensureIcon(mc, iconsDir, iconBacklog.next());
+			if (!iconBacklog.hasNext()) {
+				iconBacklog = null;
+				JsonObject ic = new JsonObject();
+				ic.addProperty("t", "icons");
+				ic.addProperty("dir", iconsUrl);
+				ic.addProperty("done", true);
+				Bridge.send(ic);
+			}
+		}
+	}
+
 	// ----------------------------------------------------------------------------
 	// worlds
 	// ----------------------------------------------------------------------------
 
 	private void manageWorld(Minecraft mc) {
-		if (desiredWorld == null || mc.gui.overlay() != null) return;
+		if (mc.gui.overlay() != null) return;
+		if (desiredWorld == null) {
+			if (mc.level != null && currentWorld != null && openingWorld == null && beamLevel != null) {
+				LOG.info("BeamNG has no level loaded: leaving {}", currentWorld);
+				controlling = false;
+				currentWorld = null;
+				mc.disconnectWithSavingScreen();
+				mc.gui.setScreen(new TitleScreen());
+			}
+			return;
+		}
 		if (mc.level != null) {
 			if (desiredWorld.equals(currentWorld)) {
-				if (!readySent && Bridge.isConnected()) {
+				boolean loaded = mc.getConnection() != null && mc.getConnection().hasClientLoaded() && mc.player != null;
+				if (!readySent && loaded && Bridge.isConnected()) {
 					readySent = true;
 					JsonObject r = new JsonObject();
 					r.addProperty("t", "ready");

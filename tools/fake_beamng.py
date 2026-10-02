@@ -46,6 +46,11 @@ class Peer:
         self.atlas = None
         self.ready = False
         self.msgs = []
+        self.gui = None
+        self.icons = None
+        self.ents = []
+        self.hud = None
+        self.pose_count = 0
         self.sampled = {}
         self.active = False
 
@@ -70,6 +75,15 @@ class Peer:
             t = m.get("t")
             if t == "p":
                 self.pose = m
+                self.pose_count += 1
+            elif t == "gui":
+                self.gui = m
+            elif t == "icons":
+                self.icons = m
+            elif t == "ents":
+                self.ents = m["l"]
+            elif t == "hud":
+                self.hud = m
             elif t == "ready":
                 self.ready = True
             elif t == "atlas":
@@ -200,8 +214,65 @@ def main():
     p.run(1.0, dict(idle, pitch=pitch, aim=aim))
     check("block broken", p.blocks.get(cell) == 0, f"id={p.blocks.get(cell)}")
 
+    # --- GUI assets
+    t0 = time.time()
+    while not (p.icons and p.icons.get("done")) and time.time() - t0 < 60:
+        p.run(0.5, dict(idle))
+    gdir = os.path.join(args.userpath, "beamcraft", "gui", p.atlas["hash"])
+    check("hud sprites + font + skin exported",
+          p.gui is not None and all(os.path.exists(os.path.join(gdir, f + ".png")) for f in ("hotbar", "font", "skin", "heart_full")),
+          f"glyphs={len(p.gui.get('glyphs', [])) if p.gui else 0}")
+    idir = os.path.join(args.userpath, "beamcraft", "icons", p.atlas["hash"], "minecraft")
+    check("item icons exported", os.path.exists(os.path.join(idir, "stone.png")) and os.path.exists(os.path.join(idir, "redstone.png")),
+          f"{len(os.listdir(idir)) if os.path.isdir(idir) else 0} icons")
+
+    # --- redstone on BeamNG ground needs a ground anchor under it
+    p.send({"t": "give", "id": "minecraft:redstone"})
+    p.run(0.3, dict(idle, pitch=pitch, aim=aim))
+    p.run(0.15, dict(idle, pitch=pitch, aim=aim, us=1, ev=[{"k": "use"}]))
+    p.run(1.0, dict(idle, pitch=pitch, aim=aim))
+    wire = p.blocks.get(cell)
+    below = (cell[0], cell[1] - 1, cell[2])
+    anchor = p.blocks.get(below)
+    check("redstone dust placed on BeamNG ground", wire not in (None, 0) and p.states.get(wire, {}).get("n") == "minecraft:redstone_wire",
+          f"id={wire} {p.states.get(wire, {}).get('n')}")
+    check("invisible ground anchor under it", anchor not in (None, 0) and p.states.get(anchor, {}).get("n") == "beamcraft:ground"
+          and len(p.states.get(anchor, {}).get("q", [1])) == 0, f"id={anchor} {p.states.get(anchor, {}).get('n')}")
+
+    # --- dropped items are streamed as entities
+    p.run(0.2, dict(idle, ev=[{"k": "drop"}]))
+    p.run(1.0, dict(idle))
+    items = [e for e in p.ents if e[1] == "i"]
+    check("dropped item streamed as an entity", len(items) > 0, str(items[:1]))
+    if items:
+        check("dropped item rests on BeamNG ground", abs(items[0][3] - p.pose["y"]) < 0.3, f"item y={items[0][3]} steve y={p.pose['y']}")
+
+    # --- a car hit hurts in survival
+    p.send({"t": "cmd", "c": "gamemode survival"})
+    p.run(0.5, dict(idle))
+    hp0 = p.hud and p.hud.get("hp")
+    p.send({"t": "hurt", "dmg": 6, "vx": 3, "vy": 4, "vz": 0})
+    p.run(1.0, dict(idle))
+    hp1 = p.hud and p.hud.get("hp")
+    check("car hit damages Steve", hp0 is not None and hp1 is not None and hp1 < hp0, f"hp {hp0} -> {hp1}")
+    p.send({"t": "cmd", "c": "gamemode creative"})
+    p.run(0.3, dict(idle))
+
+    # --- not controlling: Steve must not fall (fake terrain gone, he'd drop into the void)
     p.send({"t": "exit"})
+    p.active = False
     p.run(0.3)
+    y_before = p.pose["y"]
+    p.send({"t": "cmd", "c": "tp @s ~ ~10 ~"})
+    p.run(2.5)
+    check("idle Steve doesn't fall", abs(p.pose["y"] - (y_before + 10)) < 0.05, f"y {y_before} -> {p.pose['y']} (teleported +10)")
+
+    # --- BeamNG main menu (no level): Minecraft leaves the world
+    p.send({"t": "hello", "v": 1, "level": "none", "userPath": args.userpath})
+    p.run(3.0)
+    n0 = p.pose_count
+    p.run(2.0)
+    check("no world while BeamNG is in the menu", p.pose_count == n0, f"{p.pose_count - n0} poses in 2s")
     fails = [n for n, ok in results if not ok]
     print(f"\n{len(results) - len(fails)}/{len(results)} passed")
     sys.exit(1 if fails else 0)

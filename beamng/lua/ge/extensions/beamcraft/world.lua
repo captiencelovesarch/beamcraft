@@ -6,12 +6,15 @@
 -- into a ProceduralMesh, and rebuild static collision so vehicles hit what you build.
 
 local coords = require('beamcraft/coords')
+local mu = require('beamcraft/meshutil')
 
 local M = {}
 
 -- tunables
 M.rebuildBudgetMs = 4         -- max milliseconds of meshing per frame
-M.collisionDelay = 0.15       -- coalesce collision rebuilds (seconds)
+M.collisionDelay = 0.15       -- coalesce global collision rebuilds (fallback path only)
+M.lastSectionCollisionMs = nil -- cost of the latest per-section collision update
+M.perObjectCollision = nil     -- nil = untested, true/false once known
 M.flipWinding = true          -- MC quads are CCW-from-outside; Torque wants CW
 M.lastCollisionMs = nil       -- measured cost of the latest reloadCollision
 M.collisionReloads = 0
@@ -68,48 +71,27 @@ local function materialName(page, layer, ground)
   return string.format('bc_%s_p%d_%s_%s', atlas.hash, page, LAYER_NAMES[layer] or 'solid', ground or 'ROCK')
 end
 
-local knownMaterials = {}     -- [name] = true once registered
-local pendingMaterials = {}   -- [name] = definition, written in one batch per frame
+local KIND = { [0] = 'solid', [1] = 'cutout', [2] = 'translucent' }
 
 local function ensureMaterial(page, layer, ground)
   local name = materialName(page, layer, ground)
-  if knownMaterials[name] or pendingMaterials[name] then return name end
-  local def = {
-    name = name, mapTo = name, class = 'Material', version = 1.5,
-    Stages = {
-      { baseColorMap = string.format('%s/%s_%d.png', atlas.dir, atlas.hash, page),
-        roughnessFactor = 0.92, metallicFactor = 0 },
-      {}, {}, {},
-    },
-    groundType = ground or 'ROCK',
-    materialTag0 = 'beamcraft',
-    castShadows = true,
-  }
-  if layer == 1 then
-    def.alphaTest = true
-    def.alphaRef = 110
-    def.doubleSided = true
-  elseif layer == 2 then
-    def.translucent = true
-    def.translucentBlendOp = 'LerpAlpha'
-    def.translucentZWrite = false
-    def.doubleSided = true
-  end
-  pendingMaterials[name] = def
-  return name
+  return mu.textureMaterial(name, string.format('%s/%s_%d.png', atlas.dir, atlas.hash, page), KIND[layer] or 'solid', ground)
 end
 
-local function flushMaterials()
-  if next(pendingMaterials) == nil then return end
-  local all = {}
-  for name in pairs(knownMaterials) do all[name] = knownMaterials[name] end
-  for name, def in pairs(pendingMaterials) do all[name] = def end
-  local path = '/beamcraft/generated/' .. atlas.hash .. '.materials.json'
-  jsonWriteFile(path, all, true)
-  loadJsonMaterialsFile(path)
-  for name, def in pairs(pendingMaterials) do knownMaterials[name] = def end
-  pendingMaterials = {}
+local function flushMaterials() mu.flushMaterials() end
+
+-- for held items / dropped blocks: the quads of a state and a material picker
+function M.getStateQuads(id)
+  local st = states[id]
+  return st and st.quads or nil
 end
+
+function M.matFor(page, layer)
+  if not atlas then return nil end
+  return ensureMaterial(page, layer, 'ROCK')
+end
+
+function M.hasAtlas() return atlas ~= nil end
 
 ------------------------------------------------------------------------------
 -- protocol handlers
@@ -120,14 +102,10 @@ function M.setAtlas(msg)
   atlas = { dir = msg.dir or '/beamcraft/atlas', hash = msg.hash, pages = msg.pages }
   materialsReady = true
   if changed then
-    knownMaterials, pendingMaterials = {}, {}
     for key in pairs(sections) do markDirty(key) end
   else
     -- same atlas re-announced (e.g. pages just got written): re-read the textures
-    for name in pairs(knownMaterials) do
-      local mat = scenetree.findObject(name)
-      if mat then pcall(function() mat:reload() end) end
-    end
+    mu.reloadMaterials('bc_' .. atlas.hash)
   end
   log('I', 'beamcraft.world', string.format('atlas %s: %d page(s)', tostring(msg.hash), msg.pages or -1))
 end
@@ -274,13 +252,31 @@ local function buildSection(sec)
   return groups, missing
 end
 
+-- Give one section's mesh its own physics collision. ProceduralMesh has
+-- updatePhysicsCollision(), which registers just that mesh; the global
+-- be:reloadCollision() rebuilds the whole level (~0.1-0.3 s, a visible hitch).
+function M.updateObjectCollision(obj)
+  if M.perObjectCollision ~= false then
+    local t = hptimer()
+    local ok, err = pcall(function() obj:updatePhysicsCollision() end)
+    if ok then
+      M.perObjectCollision = true
+      M.lastSectionCollisionMs = t:stop()
+      return
+    end
+    log('W', 'beamcraft.world', 'updatePhysicsCollision unavailable, falling back to full rebuilds: ' .. tostring(err))
+    M.perObjectCollision = false
+  end
+  collisionPending = true
+end
+
 local function rebuildSection(key)
   local sec = sections[key]
   if not sec then return false end
   if sec.count <= 0 then
     deleteObjs(sec)
     sections[key] = nil
-    collisionPending = true
+    if not M.perObjectCollision then collisionPending = true end
     return true
   end
   if not atlas then return false end
@@ -310,9 +306,9 @@ local function rebuildSection(key)
         sec.objs[cflag] = obj
       end
       obj:createMesh({ list })
+      if cflag == 1 then M.updateObjectCollision(obj) end
     end
   end
-  collisionPending = true
   return true
 end
 

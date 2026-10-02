@@ -3,7 +3,13 @@ package dev.captience.beamcraft;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,6 +20,11 @@ import org.slf4j.LoggerFactory;
 public class BeamCraft implements ModInitializer {
 	public static final String MOD_ID = "beamcraft";
 	public static final Logger LOG = LoggerFactory.getLogger("BeamCraft");
+
+	public static final Block GROUND_ANCHOR = Blocks.register(
+		ResourceKey.create(Registries.BLOCK, Identifier.fromNamespaceAndPath(MOD_ID, "ground")),
+		GroundAnchorBlock::new,
+		BlockBehaviour.Properties.of().strength(-1.0F, 3600000.0F).noLootTable().noOcclusion().noCollision());
 
 	private int saveTimer;
 

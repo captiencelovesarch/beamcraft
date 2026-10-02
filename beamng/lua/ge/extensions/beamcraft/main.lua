@@ -3,7 +3,8 @@
 -- A hidden Minecraft client (Fabric mod) runs the player: movement physics,
 -- inventory, block placing and breaking, health. BeamNG renders everything and
 -- supplies the world: it raycasts its terrain into Minecraft's collision, forwards
--- your input, and meshes the blocks Minecraft reports. This extension is the glue.
+-- your input, meshes the blocks Minecraft reports, draws Steve, dropped items and
+-- the HUD, and lets cars and Minecraft hurt each other. This extension is the glue.
 --
 -- Toggle with Alt+B (or beamcraft_main.toggle() in the console).
 
@@ -15,6 +16,10 @@ local net = require('beamcraft/net')
 local world = require('beamcraft/world')
 local terrain = require('beamcraft/terrain')
 local hud = require('beamcraft/hud')
+local player = require('beamcraft/player')
+local entities = require('beamcraft/entities')
+local vehicles = require('beamcraft/vehicles')
+local mu = require('beamcraft/meshutil')
 local devconsole = require('beamcraft/devconsole')
 
 M.thirdPerson = false
@@ -26,8 +31,11 @@ local mcInfo = {}             -- from 'welcome'
 local hudState = nil
 local target = nil            -- block the crosshair is on, MC coords
 local prevSnap, curSnap = nil, nil
-local lastStatusLog = 0
 local entering = false
+local cefWasVisible = nil
+local vehTimer = 0
+
+local ctx = { world = world, iconPath = hud.iconPath }
 
 local input = {
   f = 0, b = 0, l = 0, r = 0,
@@ -47,11 +55,7 @@ local function levelId()
 end
 
 local function sendHello()
-  net.send({
-    t = 'hello', v = 1,
-    level = levelId(),
-    userPath = FS:getUserPath(),
-  })
+  net.send({ t = 'hello', v = 1, level = levelId(), userPath = FS:getUserPath() })
 end
 
 function M.setMoveInput(f, b, l, r)
@@ -90,6 +94,25 @@ function M.isPickerOpen() return hud.pickerOpen end
 -- run a Minecraft command as Steve, e.g. beamcraft_main.cmd('gamemode survival')
 function M.cmd(str) net.send({ t = 'cmd', c = str }) end
 
+local function lookRay()
+  local eye = M.getEyePos()
+  if not eye then return nil end
+  local dx, dy, dz = coords.mcLookDirBng(input.yaw, input.pitch)
+  return vec3(eye), vec3(dx, dy, dz)
+end
+
+-- left click: punch a car if one is closer than the block Minecraft is aiming at
+local function tryPunch()
+  local eye, dir = lookRay()
+  if not eye then return end
+  local reach = 4.5
+  if target then
+    local bx, by, bz = coords.mcToBng(target[1] + 0.5, target[2] + 0.5, target[3] + 0.5)
+    reach = math.min(reach, (vec3(bx, by, bz) - eye):length())
+  end
+  vehicles.punch(eye, dir, reach)
+end
+
 function M.key(name, value)
   if not active then return end
   local v = (value or 0) > 0.5 and 1 or 0
@@ -104,6 +127,7 @@ function M.key(name, value)
       inputDirty = true
       -- attack/use also need a click event, Minecraft counts presses separately
       if (name == 'attack' or name == 'use') and v == 1 then events[#events + 1] = { k = name } end
+      if name == 'attack' and v == 1 then tryPunch() end
     end
   elseif v == 1 then
     events[#events + 1] = { k = name }
@@ -129,39 +153,63 @@ function M.togglePerspective() M.thirdPerson = not M.thirdPerson end
 local eyeOut = vec3()
 local interval = 0.05
 
+local function lerpAngle(a, b, t)
+  local d = (b - a + 180) % 360 - 180
+  return a + d * t
+end
+
+-- interpolated Minecraft pose (MC coords / degrees), or nil
+local function poseNow()
+  if not curSnap then return nil end
+  local p = prevSnap or curSnap
+  local a = prevSnap and clamp((now - curSnap.at) / interval, 0, 1) or 1
+  local c = curSnap
+  return {
+    x = p.x + (c.x - p.x) * a, y = p.y + (c.y - p.y) * a, z = p.z + (c.z - p.z) * a,
+    eye = p.eye + (c.eye - p.eye) * a,
+    by = lerpAngle(p.by or 0, c.by or 0, a), hy = lerpAngle(p.hy or 0, c.hy or 0, a),
+    pitch = c.pitch, lp = (p.lp or 0) + ((c.lp or 0) - (p.lp or 0)) * a, ls = c.ls,
+    sw = c.sw, cr = c.cr, held = c.held, hs = c.hs,
+  }
+end
+M.poseNow = poseNow
+
 -- interpolated eye position in BeamNG coords, or nil before the first snapshot
 function M.getEyePos()
-  if not curSnap then return nil end
-  local a = 1
-  if prevSnap then a = clamp((now - curSnap.at) / interval, 0, 1) end
-  local p = prevSnap or curSnap
-  local x = p.x + (curSnap.x - p.x) * a
-  local y = p.y + (curSnap.y - p.y) * a
-  local z = p.z + (curSnap.z - p.z) * a
-  local eye = p.eye + (curSnap.eye - p.eye) * a
-  local bx, by, bz = coords.mcToBng(x, y + eye, z)
+  local s = poseNow()
+  if not s then return nil end
+  local bx, by, bz = coords.mcToBng(s.x, s.y + s.eye, s.z)
   eyeOut:set(bx, by, bz)
   return eyeOut
 end
 
-local function feetMc()
-  if curSnap then return curSnap.x, curSnap.y, curSnap.z end
-  return nil
+-- called by the camera mode with the exact camera pose of this frame
+function M.updateFirstPerson(camPos, yaw, pitch, dt)
+  player.visibleFirst = active and not M.thirdPerson
+  player.updateFirst(camPos, yaw, pitch, poseNow(), ctx, dt)
 end
 
 ------------------------------------------------------------------------------
 -- mode switching
 ------------------------------------------------------------------------------
 
+local function hideBeamNGUi(hide)
+  if not ui_visibility then return end
+  if hide then
+    if cefWasVisible == nil then cefWasVisible = ui_visibility.getCef() end
+    ui_visibility.setCef(false)
+  elseif cefWasVisible ~= nil then
+    ui_visibility.setCef(cefWasVisible)
+    cefWasVisible = nil
+  end
+end
+
 function M.onCameraFocus(focused)
   if focused then
     if lockMouse then lockMouse(true) end
   else
     if lockMouse then lockMouse(false) end
-    if active then
-      active = false
-      net.send({ t = 'exit' })
-    end
+    if active then M.exit() end
   end
 end
 
@@ -184,31 +232,38 @@ function M.enter()
   end
   local camPos = core_camera.getPosition()
   local fwdv = core_camera.getForward()
+  -- if you're in a car, step out next to it
+  local veh = getPlayerVehicle(0)
+  if veh and (veh:getPosition() - camPos):length() < 12 then
+    local side = veh:getDirectionVectorUp():cross(veh:getDirectionVector()):normalized()
+    camPos = veh:getPosition() + side * 2.2 + vec3(0, 0, 1.5)
+  end
   local feetZ = groundBelow(camPos)
   local mx, my, mz = coords.bngToMc(camPos.x, camPos.y, feetZ + 0.05)
   local yaw = math.atan2(fwdv.x, fwdv.y)
   local mcYaw = coords.bngLookToMc(yaw, 0)
   terrain.reset()
-  prevSnap, curSnap = nil, nil
+  prevSnap = nil
   net.send({ t = 'enter', x = mx, y = my, z = mz, yaw = mcYaw })
   -- prime the camera where Steve will appear, so there is no flash
-  curSnap = { x = mx, y = my, z = mz, eye = 1.62, at = now }
+  curSnap = { x = mx, y = my, z = mz, eye = 1.62, at = now, by = mcYaw, hy = mcYaw }
   active = true
   entering = false
   core_camera.setByName(0, 'beamcraft', false)
   local cam = core_camera.getGlobalCameras and core_camera.getGlobalCameras()['beamcraft']
-  if cam then
-    cam.yaw, cam.pitch = yaw, 0
-  end
-  hud.addChat('BeamCraft: you are Steve. Alt+B to leave.')
+  if cam then cam.yaw, cam.pitch = yaw, 0 end
+  hideBeamNGUi(true)
+  hud.addChat('You are Steve. Alt+B to go back to driving.')
 end
 
 function M.exit()
   if not active then return end
   active = false
   hud.pickerOpen = false
+  player.visibleFirst = false
   net.send({ t = 'exit' })
   if lockMouse then lockMouse(false) end
+  hideBeamNGUi(false)
   -- back to the vehicle camera if there is a vehicle, else the free camera
   if getPlayerVehicle(0) then
     core_camera.setByName(0, nil)
@@ -231,29 +286,38 @@ local handlers = {}
 
 handlers.welcome = function(m)
   mcInfo = m
-  log('I', 'beamcraft', 'Minecraft says hello: ' .. dumps(m))
+  log('I', 'beamcraft', 'Minecraft ' .. tostring(m.mc) .. ', world ' .. tostring(m.world))
 end
 
 handlers.ready = function(m)
   ready = true
   mcInfo.world = m.world
-  hud.addChat('BeamCraft: world "' .. tostring(m.world) .. '" ready')
   if entering then M.enter() end
 end
 
 handlers.unready = function(m)
   ready = false
   if active then M.exit() end
+  entities.clear()
 end
 
 handlers.atlas = function(m) world.setAtlas(m) end
 handlers.states = function(m) world.defineStates(m) end
 handlers.blocks = function(m) world.setBlocks(m) end
-handlers.clear = function(m) world.clear() terrain.reset() end
+handlers.clear = function(m) world.clear() terrain.reset() entities.clear() end
+handlers.gui = function(m)
+  hud.gui = m
+  player.setSkin(m.dir, m.slim)
+end
+handlers.icons = function(m) hud.iconsDir = m.dir end
+handlers.ents = function(m) entities.snapshot(m, now, ctx) end
+handlers.boom = function(m) vehicles.explode(m.x, m.y, m.z, m.r or 4, now) end
 
 handlers.p = function(m)
   prevSnap = curSnap
-  curSnap = { x = m.x, y = m.y, z = m.z, eye = m.eye or 1.62, at = now }
+  m.at = now
+  m.eye = m.eye or 1.62
+  curSnap = m
   if prevSnap then
     -- teleports (respawn, /tp) should snap, not glide
     local dx, dy, dz = curSnap.x - prevSnap.x, curSnap.y - prevSnap.y, curSnap.z - prevSnap.z
@@ -266,7 +330,6 @@ handlers.hud = function(m) hudState = m end
 handlers.items = function(m) hud.items = { blocks = m.blocks or {}, other = m.other or {} } end
 handlers.chat = function(m) hud.addChat(m.m) end
 handlers.look = function(m)
-  -- Minecraft changed our look (teleport/respawn): adopt it
   local cam = core_camera.getGlobalCameras and core_camera.getGlobalCameras()['beamcraft']
   if cam then cam.yaw, cam.pitch = coords.mcLookToBng(m.yaw, m.pitch) end
 end
@@ -291,21 +354,10 @@ local inputTimer = 0
 local function drawTarget()
   if not target then return end
   local x, y, z = target[1], target[2], target[3]
-  local c = ColorF(0, 0, 0, 0.9)
-  local function p(dx, dy, dz)
-    local bx, by, bz = coords.mcToBng(x + dx, y + dy, z + dz)
-    return vec3(bx, by, bz)
-  end
-  local e = 0.002
-  local a0, a1 = -e, 1 + e
-  local corners = {
-    p(a0, a0, a0), p(a1, a0, a0), p(a1, a0, a1), p(a0, a0, a1),
-    p(a0, a1, a0), p(a1, a1, a0), p(a1, a1, a1), p(a0, a1, a1),
-  }
-  local edges = { {1,2},{2,3},{3,4},{4,1},{5,6},{6,7},{7,8},{8,5},{1,5},{2,6},{3,7},{4,8} }
-  for _, ed in ipairs(edges) do
-    debugDrawer:drawLine(corners[ed[1]], corners[ed[2]], c)
-  end
+  local e = 0.003
+  local bx0, by1, bz0 = coords.mcToBng(x - e, y - e, z - e)
+  local bx1, by0, bz1 = coords.mcToBng(x + 1 + e, y + 1 + e, z + 1 + e)
+  entities.boxLines(bx0, by0, bz0, bx1, by1, bz1, ColorF(0, 0, 0, 0.75))
 end
 
 local function statusLines()
@@ -315,9 +367,9 @@ local function statusLines()
   if net.isConnected() then
     lines[2] = string.format('blocks %d  sections %d  states %d  dirty %d',
       world.getTotalBlocks(), world.getSectionCount(), world.getStateCount(), world.getDirtyCount())
-    if world.lastCollisionMs then
-      lines[3] = string.format('collision rebuild %.1f ms (x%d)  rays %d', world.lastCollisionMs, world.collisionReloads, terrain.raysLastFrame)
-    end
+    lines[3] = string.format('collision: %s  %.2f ms/section  full rebuild %s ms',
+      world.perObjectCollision == nil and '?' or (world.perObjectCollision and 'per-section' or 'FULL'),
+      world.lastSectionCollisionMs or 0, world.lastCollisionMs and string.format('%.0f', world.lastCollisionMs) or '-')
   end
   return lines
 end
@@ -333,18 +385,34 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   end, function()
     ready = false
     if active then M.exit() end
+    entities.clear()
   end)
   for i = 1, #msgs do handle(msgs[i]) end
 
   world.update(dtReal)
 
-  if active and net.isConnected() then
+  local pose = poseNow()
+  -- Steve stays visible standing where you left him while you drive
+  player.visibleThird = ready and pose ~= nil and (M.thirdPerson or not active)
+  player.updateThird(pose, ctx)
+  entities.update(now)
+  vehicles.drawFlashes(now)
+
+  if active and net.isConnected() and pose then
+    local fx, fy, fz = pose.x, pose.y, pose.z
     -- terrain under Steve
-    local fx, fy, fz = feetMc()
-    if fx then
-      local ter = terrain.update(fx, fy, fz)
-      if ter then net.send(ter) end
+    local ter = terrain.update(fx, fy, fz)
+    if ter then net.send(ter) end
+
+    -- cars: solid to Steve (10 Hz), and they hurt
+    local feetB = vec3(coords.mcToBng(fx, fy, fz))
+    vehTimer = vehTimer + dtReal
+    if vehTimer > 0.1 then
+      vehTimer = 0
+      net.send({ t = 'veh', b = vehicles.collisionBoxes(feetB) })
     end
+    local hurt = vehicles.checkHits(now, feetB)
+    if hurt then net.send(hurt) end
 
     -- input: on change, and at least 20 Hz so Minecraft never acts on stale state
     inputTimer = inputTimer + dtReal
@@ -360,10 +428,9 @@ local function onUpdate(dtReal, dtSim, dtRaw)
       }
       if #events > 0 then msg.ev = events events = {} end
       -- where the crosshair meets BeamNG's world, for placing blocks on the ground
-      local eye = M.getEyePos()
+      local eye, dir = lookRay()
       if eye then
-        local dx, dy, dz = coords.mcLookDirBng(input.yaw, input.pitch)
-        local aim = terrain.aim(vec3(eye), vec3(dx, dy, dz), 6)
+        local aim = terrain.aim(eye, dir, 6)
         if aim then msg.aim = aim end
       end
       net.send(msg)
@@ -381,6 +448,8 @@ end
 local function onExtensionUnloaded()
   if active then M.exit() end
   world.clear()
+  entities.clear()
+  player.destroy()
   net.close('extension unloaded')
   devconsole.close()
 end
@@ -389,15 +458,25 @@ local function onClientStartMission()
   -- new level: Minecraft swaps to that level's world
   world.clear()
   terrain.reset()
+  entities.clear()
+  player.destroy()
+  if hud.gui then player.setSkin(hud.gui.dir, hud.gui.slim) end
   ready = false
+  curSnap, prevSnap = nil, nil
   if net.isConnected() then sendHello() end
 end
 
 local function onClientEndMission()
   if active then M.exit() end
   world.clear()
+  entities.clear()
+  player.destroy()
   ready = false
-  if net.isConnected() then net.send({ t = 'leave' }) end
+  curSnap, prevSnap = nil, nil
+  if net.isConnected() then
+    net.send({ t = 'leave' })
+    sendHello() -- level is now 'none': Minecraft leaves the world
+  end
 end
 
 M.onUpdate = onUpdate
@@ -411,5 +490,9 @@ M.world = world
 M.terrain = terrain
 M.net = net
 M.hud = hud
+M.player = player
+M.entities = entities
+M.vehicles = vehicles
+M.meshutil = mu
 
 return M

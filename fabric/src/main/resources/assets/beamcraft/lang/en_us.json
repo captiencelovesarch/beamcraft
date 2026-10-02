@@ -1,0 +1,5 @@
+{
+  "death.attack.beamcraft_vehicle": "%1$s was hit by a car",
+  "death.attack.beamcraft_vehicle.player": "%1$s was hit by a car driven by %2$s",
+  "block.beamcraft.ground": "BeamNG Ground"
+}

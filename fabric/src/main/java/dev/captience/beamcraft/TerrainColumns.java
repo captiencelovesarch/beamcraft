@@ -59,6 +59,18 @@ public final class TerrainColumns {
 		}
 	}
 
+	/** Known surface height of the column holding (x, z), or null. */
+	public static Float heightAt(double x, double z) {
+		return HEIGHTS.get(key(Mth.floor(x / res), Mth.floor(z / res)));
+	}
+
+	// BeamNG vehicles near the player, as boxes, replaced wholesale on every update
+	private static volatile List<AABB> vehicleBoxes = List.of();
+
+	public static void setVehicleBoxes(List<AABB> boxes) {
+		vehicleBoxes = boxes;
+	}
+
 	/** True once any ground under (x, z) is known. */
 	public static boolean hasGroundAt(double x, double z) {
 		Float h = HEIGHTS.get(key(Mth.floor(x / res), Mth.floor(z / res)));
@@ -70,13 +82,20 @@ public final class TerrainColumns {
 	}
 
 	public static List<VoxelShape> shapesFor(AABB box) {
-		if (!enabled || HEIGHTS.isEmpty()) return List.of();
+		if (!enabled) return List.of();
+		List<VoxelShape> out = null;
+		for (AABB v : vehicleBoxes) {
+			if (v.intersects(box)) {
+				if (out == null) out = new ArrayList<>();
+				out.add(Shapes.create(v));
+			}
+		}
+		if (HEIGHTS.isEmpty()) return out == null ? List.of() : out;
 		double r = res;
 		int i0 = Mth.floor(box.minX / r), i1 = Mth.floor(box.maxX / r);
 		int k0 = Mth.floor(box.minZ / r), k1 = Mth.floor(box.maxZ / r);
 		// a huge query box (explosions, big entities) would allocate a lot: cap it
-		if ((long) (i1 - i0 + 1) * (k1 - k0 + 1) > 4096) return List.of();
-		List<VoxelShape> out = null;
+		if ((long) (i1 - i0 + 1) * (k1 - k0 + 1) > 4096) return out == null ? List.of() : out;
 		for (int i = i0; i <= i1; i++) {
 			for (int k = k0; k <= k1; k++) {
 				Float h = HEIGHTS.get(key(i, k));
