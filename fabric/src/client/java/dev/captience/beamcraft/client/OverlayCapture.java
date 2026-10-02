@@ -91,54 +91,53 @@ public final class OverlayCapture {
 		}, 0);
 	}
 
+	private static final int TILE = 32;
+
 	/** px = ABGR ints (RGBA bytes), rows bottom-up, colour premultiplied by alpha. */
 	private static void encodeAndSend(int[] px, int w, int h) {
 		// flip to top-down
 		int[] cur = new int[w * h];
 		for (int y = 0; y < h; y++) System.arraycopy(px, (h - 1 - y) * w, cur, y * w, w);
 
-		int x0 = 0, y0 = 0, x1 = w - 1, y1 = h - 1;
 		boolean full = OverlayServer.needFullFrame || prev == null || prevW != w || prevH != h;
-		if (full) {
-			OverlayServer.needFullFrame = false;
-		} else {
-			int minX = w, maxX = -1, minY = h, maxY = -1;
-			for (int y = 0; y < h; y++) {
-				int row = y * w;
-				int first = -1;
-				for (int x = 0; x < w; x++) {
-					if (cur[row + x] != prev[row + x]) {
-						first = x;
-						break;
-					}
-				}
-				if (first < 0) continue;
-				int last = first;
-				for (int x = w - 1; x > first; x--) {
-					if (cur[row + x] != prev[row + x]) {
-						last = x;
-						break;
-					}
-				}
-				if (y < minY) minY = y;
-				maxY = y;
-				if (first < minX) minX = first;
-				if (last > maxX) maxX = last;
-			}
-			if (maxY < 0) {
-				prev = cur;
-				return; // nothing changed
-			}
-			x0 = minX;
-			x1 = maxX;
-			y0 = minY;
-			y1 = maxY;
-		}
+		int[] old = prev;
 		prev = cur;
 		prevW = w;
 		prevH = h;
+		if (full) {
+			OverlayServer.needFullFrame = false;
+			sendRect(cur, w, h, 0, 0, w, h);
+			return;
+		}
+		// Changed 32x32 tiles, merged into horizontal runs per tile row: the hand and
+		// the hotbar changing together shouldn't resend the whole screen between them.
+		int tilesX = (w + TILE - 1) / TILE, tilesY = (h + TILE - 1) / TILE;
+		for (int ty = 0; ty < tilesY; ty++) {
+			int y0 = ty * TILE, y1 = Math.min(h, y0 + TILE);
+			int runStart = -1;
+			for (int tx = 0; tx <= tilesX; tx++) {
+				boolean changed = tx < tilesX && tileChanged(cur, old, w, tx * TILE, y0, Math.min(w, tx * TILE + TILE), y1);
+				if (changed && runStart < 0) runStart = tx;
+				if (!changed && runStart >= 0) {
+					int x0 = runStart * TILE, x1 = Math.min(w, tx * TILE);
+					sendRect(cur, w, h, x0, y0, x1 - x0, y1 - y0);
+					runStart = -1;
+				}
+			}
+		}
+	}
 
-		int rw = x1 - x0 + 1, rh = y1 - y0 + 1;
+	private static boolean tileChanged(int[] cur, int[] old, int w, int x0, int y0, int x1, int y1) {
+		for (int y = y0; y < y1; y++) {
+			int row = y * w;
+			for (int x = x0; x < x1; x++) {
+				if (cur[row + x] != old[row + x]) return true;
+			}
+		}
+		return false;
+	}
+
+	private static void sendRect(int[] cur, int w, int h, int x0, int y0, int rw, int rh) {
 		int len = 20 + rw * rh * 4;
 		if (out.length < len) out = new byte[len];
 		byte[] o = out;
@@ -158,9 +157,9 @@ public final class OverlayCapture {
 		o[18] = (byte) (frameId >>> 16);
 		o[19] = (byte) (frameId >>> 24);
 		int p = 20;
-		for (int y = y0; y <= y1; y++) {
+		for (int y = y0; y < y0 + rh; y++) {
 			int row = y * w;
-			for (int x = x0; x <= x1; x++) {
+			for (int x = x0; x < x0 + rw; x++) {
 				int c = cur[row + x];
 				int a = c >>> 24;
 				int r = c & 0xFF, g = (c >>> 8) & 0xFF, b = (c >>> 16) & 0xFF;
@@ -178,11 +177,14 @@ public final class OverlayCapture {
 		}
 		if (OverlayServer.hasWebSocketViewers()) OverlayServer.broadcast(o, len);
 		if (OverlayServer.hasRawViewers()) {
-			byte[] head = (w + "," + h + "," + x0 + "," + y0 + "," + rw + "," + rh + "|").getBytes(StandardCharsets.US_ASCII);
+			// already shaped as the JS hook's argument list, so BeamNG's Lua passes it on as-is
+			byte[] head = ("[\"" + w + "," + h + "," + x0 + "," + y0 + "," + rw + "," + rh + "|").getBytes(StandardCharsets.US_ASCII);
 			byte[] enc = Base64.getEncoder().encode(java.util.Arrays.copyOfRange(o, 20, len));
-			byte[] raw = new byte[head.length + enc.length];
+			byte[] raw = new byte[head.length + enc.length + 2];
 			System.arraycopy(head, 0, raw, 0, head.length);
 			System.arraycopy(enc, 0, raw, head.length, enc.length);
+			raw[raw.length - 2] = '"';
+			raw[raw.length - 1] = ']';
 			OverlayServer.broadcastRaw(raw, raw.length);
 		}
 	}

@@ -4,7 +4,8 @@
 -- (ui/modModules/beamcraft) untouched, via guihooks.triggerRawJS.
 --
 -- Wire format per patch: u32 little-endian length, then ASCII
--- "fullW,fullH,x,y,w,h|<base64 RGBA>".
+-- '["fullW,fullH,x,y,w,h|<base64 RGBA>"]' - already the JS hook's argument list, so it
+-- is queued for the page without being copied or re-encoded here.
 
 local socket = require('socket.socket')
 local sbuf = require('string.buffer')
@@ -77,7 +78,7 @@ function M.update(dt, enabled)
     M.patches = M.patches + 1
     M.bytes = M.bytes + need
     need = nil
-    guihooks.triggerRawJS('BeamCraftFrame', '"' .. patch .. '"')
+    be:queueHookJS('BeamCraftFrame', patch, 0)
   end
 end
 
