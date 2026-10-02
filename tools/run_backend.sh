@@ -11,4 +11,4 @@ export JAVA_HOME=/usr/lib/jvm/java-25-openjdk
 if [[ "${1:-}" == "--visible" ]]; then
   exec ./gradlew runClient -Pheadless=false
 fi
-exec xvfb-run -a -s "-screen 0 854x480x24" ./gradlew runClient -Pheadless=true
+exec xvfb-run -a -s "-screen 0 3840x2160x24" ./gradlew runClient -Pheadless=true

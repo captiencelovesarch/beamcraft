@@ -102,6 +102,7 @@ public class BeamCraftClient implements ClientModInitializer {
 	public void onInitializeClient() {
 		LOG.info("BeamCraft client starting (headless={})", HEADLESS);
 		Bridge.start();
+		OverlayServer.start();
 		ClientLifecycleEvents.CLIENT_STARTED.register(this::configure);
 		ClientTickEvents.START_CLIENT_TICK.register(this::startTick);
 		ClientTickEvents.END_CLIENT_TICK.register(this::endTick);
@@ -117,6 +118,8 @@ public class BeamCraftClient implements ClientModInitializer {
 		Options o = mc.options;
 		o.pauseOnLostFocus = false;
 		o.onboardAccessibility = false;
+		o.tutorialStep = net.minecraft.client.tutorial.TutorialSteps.NONE;
+		mc.getTutorial().setStep(net.minecraft.client.tutorial.TutorialSteps.NONE);
 		if (HEADLESS) {
 			o.renderDistance().set(6);
 			o.simulationDistance().set(6);
@@ -144,7 +147,55 @@ public class BeamCraftClient implements ClientModInitializer {
 			Runnable compiled = mc.getConnection().getPlayerCompiledSectionCallback();
 			if (compiled != null) compiled.run();
 		}
+		applyOverlayInput(mc);
 		applyInput(mc);
+	}
+
+	/**
+	 * Mouse and keyboard from BeamNG's overlay page (only sent while a Minecraft screen is
+	 * open), replayed through Minecraft's own GLFW handlers so every screen just works.
+	 */
+	private void applyOverlayInput(Minecraft mc) {
+		JsonObject e;
+		long handle = mc.getWindow().handle();
+		var mouse = (dev.captience.beamcraft.client.mixin.MouseHandlerInvoker) mc.mouseHandler;
+		var keys = (dev.captience.beamcraft.client.mixin.KeyboardHandlerInvoker) mc.keyboardHandler;
+		while ((e = OverlayServer.INPUT.poll()) != null) {
+			try {
+				switch (e.get("t").getAsString()) {
+					case "mm" -> mouse.beamcraft$onMove(handle, num(e, "x"), num(e, "y"));
+					case "mb" -> {
+						if (e.has("x")) mouse.beamcraft$onMove(handle, num(e, "x"), num(e, "y"));
+						mouse.beamcraft$onButton(handle, new net.minecraft.client.input.MouseButtonInfo((int) num(e, "b"), (int) num(e, "m")), (int) num(e, "a"));
+					}
+					case "ms" -> mouse.beamcraft$onScroll(handle, num(e, "dx"), num(e, "dy"));
+					case "key" -> keys.beamcraft$keyPress(handle, (int) num(e, "a"),
+						new net.minecraft.client.input.KeyEvent((int) num(e, "k"), (int) num(e, "sc"), (int) num(e, "m")));
+					case "ch" -> keys.beamcraft$charTyped(handle, new net.minecraft.client.input.CharacterEvent((int) num(e, "c")));
+					case "full" -> OverlayServer.needFullFrame = true;
+					default -> {
+					}
+				}
+			} catch (RuntimeException ex) {
+				LOG.debug("Overlay input {} failed: {}", e, ex.toString());
+			}
+		}
+	}
+
+	/**
+	 * Size the hidden window to BeamNG's viewport (halved: Minecraft's GUI is pixel art,
+	 * so rendering at half size and upscaling 2x looks the same and costs a quarter).
+	 */
+	private void applyViewport(Minecraft mc, int w, int h) {
+		if (w <= 0 || h <= 0 || !HEADLESS) return;
+		int k = 2;
+		int ww = Math.max(320, w / k), wh = Math.max(240, h / k);
+		int effective = Math.max(2, Math.round(h / 360f));
+		int scale = Math.max(1, Math.round(effective / (float) k));
+		mc.options.guiScale().set(scale);
+		mc.getWindow().setWindowed(ww, wh);
+		mc.resizeGui();
+		LOG.info("Overlay {}x{} (BeamNG {}x{}), GUI scale {}", ww, wh, w, h, scale);
 	}
 
 	private void handle(Minecraft mc, JsonObject m) {
@@ -189,6 +240,7 @@ public class BeamCraftClient implements ClientModInitializer {
 				}
 			}
 			case "give" -> giveToSelected(mc, m.get("id").getAsString());
+			case "viewport" -> applyViewport(mc, m.get("vw").getAsInt(), m.get("vh").getAsInt());
 			case "hurt" -> onHurt(mc, m);
 			case "veh" -> {
 				java.util.List<net.minecraft.world.phys.AABB> boxes = new java.util.ArrayList<>();
@@ -206,6 +258,7 @@ public class BeamCraftClient implements ClientModInitializer {
 	private void onHello(Minecraft mc, JsonObject m) {
 		beamLevel = m.has("level") ? m.get("level").getAsString() : "none";
 		if (m.has("userPath")) userPath = Path.of(m.get("userPath").getAsString());
+		if (m.has("vw") && m.has("vh")) applyViewport(mc, m.get("vw").getAsInt(), m.get("vh").getAsInt());
 		// BeamNG's main menu has no level: no world either, so nothing can fall into the void
 		desiredWorld = beamLevel.isEmpty() || beamLevel.equals("none") ? null : worldIdFor(beamLevel);
 		readySent = false;
@@ -279,6 +332,10 @@ public class BeamCraftClient implements ClientModInitializer {
 			case "use" -> click(o.keyUse);
 			case "pick" -> click(o.keyPickItem);
 			case "drop" -> click(o.keyDrop);
+			case "inventory" -> click(o.keyInventory);
+			case "chat" -> click(o.keyChat);
+			case "command" -> click(o.keyCommand);
+			case "view" -> click(o.keyTogglePerspective);
 			case "slot" -> {
 				if (p != null) p.getInventory().setSelectedSlot(Math.floorMod((int) num(e, "n"), 9));
 			}
@@ -397,7 +454,9 @@ public class BeamCraftClient implements ClientModInitializer {
 			.append(",\"lp\":").append(r4(p.walkAnimation.position(1f)))
 			.append(",\"ls\":").append(r4(p.walkAnimation.speed(1f)))
 			.append(",\"sw\":").append(r4(p.getAttackAnim(1f)))
-			.append(",\"cr\":").append(p.isCrouching() ? 1 : 0);
+			.append(",\"cr\":").append(p.isCrouching() ? 1 : 0)
+			.append(",\"scr\":").append(mc.gui.screen() != null ? 1 : 0)
+			.append(",\"cam\":").append(mc.options.getCameraType().ordinal());
 		ItemStack held = p.getMainHandItem();
 		if (!held.isEmpty()) {
 			String hid = BuiltInRegistries.ITEM.getKey(held.getItem()).toString();

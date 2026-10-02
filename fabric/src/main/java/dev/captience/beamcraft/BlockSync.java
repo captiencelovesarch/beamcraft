@@ -38,6 +38,14 @@ public final class BlockSync {
 	public static final ConcurrentLinkedQueue<int[]> CHANGES = new ConcurrentLinkedQueue<>();
 	private static final Set<Long> CHUNK_INDEX = ConcurrentHashMap.newKeySet();
 	private static volatile boolean indexDirty;
+	private static volatile boolean worldDirty;
+
+	/** True (once) if any block changed since the last call. */
+	public static boolean consumeDirty() {
+		boolean d = worldDirty;
+		worldDirty = false;
+		return d;
+	}
 	private static volatile MinecraftServer server;
 
 	private BlockSync() {}
@@ -86,6 +94,7 @@ public final class BlockSync {
 	public static void onBlockUpdated(ServerLevel level, BlockPos pos, BlockState state) {
 		if (level.dimension() != Level.OVERWORLD) return;
 		CHANGES.add(new int[] {pos.getX(), pos.getY(), pos.getZ(), Block.getId(state)});
+		worldDirty = true;
 		if (!state.isAir() && CHUNK_INDEX.add(ChunkPos.pack(pos.getX() >> 4, pos.getZ() >> 4))) {
 			indexDirty = true;
 		}

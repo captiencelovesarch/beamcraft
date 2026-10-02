@@ -32,8 +32,11 @@ local hudState = nil
 local target = nil            -- block the crosshair is on, MC coords
 local prevSnap, curSnap = nil, nil
 local entering = false
-local cefWasVisible = nil
 local vehTimer = 0
+local screenOpen = false      -- a Minecraft screen (inventory, chat...) is open
+local overlaySent = nil
+local viewport = { w = 0, h = 0 }
+local viewportTimer = 0
 
 local ctx = { world = world, iconPath = hud.iconPath }
 
@@ -54,12 +57,51 @@ local function levelId()
   return id or 'none'
 end
 
-local function sendHello()
-  net.send({ t = 'hello', v = 1, level = levelId(), userPath = FS:getUserPath() })
+local function viewportSize()
+  local vp = ui_imgui.GetMainViewport()
+  if not vp then return 0, 0 end
+  return math.floor(vp.Size.x), math.floor(vp.Size.y)
 end
 
+local function sendHello()
+  viewport.w, viewport.h = viewportSize()
+  net.send({ t = 'hello', v = 1, level = levelId(), userPath = FS:getUserPath(), vw = viewport.w, vh = viewport.h })
+end
+
+local function toast(msg)
+  log('I', 'beamcraft', msg)
+  guihooks.trigger('toastrMsg', { type = 'info', title = 'BeamCraft', msg = msg })
+end
+
+-- the overlay page (ui/modModules/beamcraft) asks for this, and gets pushed changes
+function M.overlayState()
+  return { visible = active, interactive = active and screenOpen }
+end
+
+local function pushOverlayState()
+  local st = M.overlayState()
+  local key = tostring(st.visible) .. tostring(st.interactive)
+  if key ~= overlaySent then
+    overlaySent = key
+    guihooks.trigger('BeamCraftOverlay', st)
+  end
+end
+
+-- a Minecraft screen opened or closed: hand the mouse and keyboard to the overlay
+local function setScreenOpen(open)
+  if open == screenOpen then return end
+  screenOpen = open
+  if lockMouse then lockMouse(active and not open) end
+  if setCEFTyping then setCEFTyping(active and open) end
+  input.f, input.b, input.l, input.r = 0, 0, 0, 0
+  input.jump, input.sneak, input.sprint, input.attack, input.use = 0, 0, 0, 0, 0
+  inputDirty = true
+  pushOverlayState()
+end
+function M.isScreenOpen() return screenOpen end
+
 function M.setMoveInput(f, b, l, r)
-  if hud.pickerOpen then return end
+  if screenOpen then return end
   f, b, l, r = clamp(f, 0, 1), clamp(b, 0, 1), clamp(l, 0, 1), clamp(r, 0, 1)
   if f ~= input.f or b ~= input.b or l ~= input.l or r ~= input.r then
     input.f, input.b, input.l, input.r = f, b, l, r
@@ -75,21 +117,7 @@ function M.setLook(yaw, pitch)
   end
 end
 
-local function setPicker(open)
-  hud.pickerOpen = open
-  if lockMouse then lockMouse(not open) end
-  if open then
-    -- let go of everything so Steve doesn't keep walking while you browse
-    input.f, input.b, input.l, input.r = 0, 0, 0, 0
-    input.jump, input.sneak, input.sprint, input.attack, input.use = 0, 0, 0, 0, 0
-    inputDirty = true
-  end
-end
-
-hud.onPick = function(id) net.send({ t = 'give', id = id }) end
-hud.onClose = function() setPicker(false) end
-
-function M.isPickerOpen() return hud.pickerOpen end
+function M.isPickerOpen() return screenOpen end
 
 -- run a Minecraft command as Steve, e.g. beamcraft_main.cmd('gamemode survival')
 function M.cmd(str) net.send({ t = 'cmd', c = str }) end
@@ -116,11 +144,7 @@ end
 function M.key(name, value)
   if not active then return end
   local v = (value or 0) > 0.5 and 1 or 0
-  if name == 'inventory' then
-    if v == 1 then setPicker(not hud.pickerOpen) end
-    return
-  end
-  if hud.pickerOpen then return end
+  if screenOpen then return end
   if name == 'jump' or name == 'sneak' or name == 'sprint' or name == 'attack' or name == 'use' then
     if input[name] ~= v then
       input[name] = v
@@ -135,7 +159,7 @@ function M.key(name, value)
 end
 
 function M.slot(n)
-  if active and not hud.pickerOpen then events[#events + 1] = { k = 'slot', n = n } end
+  if active and not screenOpen then events[#events + 1] = { k = 'slot', n = n } end
 end
 
 function M.scroll(value)
@@ -144,7 +168,11 @@ function M.scroll(value)
   end
 end
 
-function M.togglePerspective() M.thirdPerson = not M.thirdPerson end
+-- F5: Minecraft cycles its camera (first person / behind / in front); we follow it
+function M.togglePerspective()
+  if active and not screenOpen then events[#events + 1] = { k = 'view' } end
+end
+M.cameraMode = 0
 
 ------------------------------------------------------------------------------
 -- player pose
@@ -185,8 +213,7 @@ end
 
 -- called by the camera mode with the exact camera pose of this frame
 function M.updateFirstPerson(camPos, yaw, pitch, dt)
-  player.visibleFirst = active and not M.thirdPerson
-  player.updateFirst(camPos, yaw, pitch, poseNow(), ctx, dt)
+  -- the first-person hand and held item are drawn by Minecraft, in the overlay
 end
 
 ------------------------------------------------------------------------------
@@ -194,14 +221,8 @@ end
 ------------------------------------------------------------------------------
 
 local function hideBeamNGUi(hide)
-  if not ui_visibility then return end
-  if hide then
-    if cefWasVisible == nil then cefWasVisible = ui_visibility.getCef() end
-    ui_visibility.setCef(false)
-  elseif cefWasVisible ~= nil then
-    ui_visibility.setCef(cefWasVisible)
-    cefWasVisible = nil
-  end
+  -- hide BeamNG's apps but keep its UI layer: Minecraft's overlay is drawn there
+  guihooks.trigger('ShowApps', not hide)
 end
 
 function M.onCameraFocus(focused)
@@ -222,11 +243,11 @@ end
 function M.enter()
   if active then return end
   if not net.isConnected() then
-    hud.addChat('BeamCraft: Minecraft is not running (start tools/run_backend.sh)')
+    toast('Minecraft is not running (start tools/run_backend.sh)')
     return
   end
   if not ready then
-    hud.addChat('BeamCraft: Minecraft is still loading the world...')
+    toast('Minecraft is still loading the world...')
     entering = true
     return
   end
@@ -253,17 +274,20 @@ function M.enter()
   local cam = core_camera.getGlobalCameras and core_camera.getGlobalCameras()['beamcraft']
   if cam then cam.yaw, cam.pitch = yaw, 0 end
   hideBeamNGUi(true)
-  hud.addChat('You are Steve. Alt+B to go back to driving.')
+  pushOverlayState()
 end
 
 function M.exit()
   if not active then return end
   active = false
-  hud.pickerOpen = false
-  player.visibleFirst = false
+  setScreenOpen(false)
+  if setCEFTyping then setCEFTyping(false) end
   net.send({ t = 'exit' })
   if lockMouse then lockMouse(false) end
   hideBeamNGUi(false)
+  pushOverlayState()
+  -- you're about to drive: make what you built solid now (one hitch, during the switch)
+  world.rebuildCollisionNow()
   -- back to the vehicle camera if there is a vehicle, else the free camera
   if getPlayerVehicle(0) then
     core_camera.setByName(0, nil)
@@ -324,11 +348,16 @@ handlers.p = function(m)
     if dx * dx + dy * dy + dz * dz > 100 then prevSnap = nil end
   end
   target = m.tgt
+  if active then
+    setScreenOpen(m.scr == 1)
+    M.cameraMode = m.cam or 0
+    M.thirdPerson = M.cameraMode ~= 0
+  end
 end
 
 handlers.hud = function(m) hudState = m end
 handlers.items = function(m) hud.items = { blocks = m.blocks or {}, other = m.other or {} } end
-handlers.chat = function(m) hud.addChat(m.m) end
+handlers.chat = function(m) log('I', 'beamcraft', 'chat: ' .. tostring(m.m)) end
 handlers.look = function(m)
   local cam = core_camera.getGlobalCameras and core_camera.getGlobalCameras()['beamcraft']
   if cam then cam.yaw, cam.pitch = coords.mcLookToBng(m.yaw, m.pitch) end
@@ -347,6 +376,27 @@ end
 ------------------------------------------------------------------------------
 
 world.onBlockChanged = function(x, y, z) terrain.invalidateBlock(x, y, z) end
+
+-- Collision rebuilds hitch the game, so only do them when a car needs them: while you
+-- drive, or when a moving car is heading for blocks that changed. Never just because
+-- Steve placed a block (Minecraft handles his collision).
+world.shouldRebuildCollision = function(centres)
+  if not active then return true end
+  local need = false
+  for _, veh in ipairs(getAllVehicles()) do
+    local v = veh:getVelocity()
+    local speed = v:length()
+    if speed > 1.5 and veh:getJBeamFilename() ~= 'unicycle' then
+      local p = veh:getPosition()
+      local reach = 15 + speed * 2.5
+      for _, c in ipairs(centres) do
+        if (c - p):length() < reach then need = true break end
+      end
+    end
+    if need then break end
+  end
+  return need
+end
 world.onCollisionReloaded = function() terrain.invalidateAll() end
 
 local inputTimer = 0
@@ -367,9 +417,9 @@ local function statusLines()
   if net.isConnected() then
     lines[2] = string.format('blocks %d  sections %d  states %d  dirty %d',
       world.getTotalBlocks(), world.getSectionCount(), world.getStateCount(), world.getDirtyCount())
-    lines[3] = string.format('collision: %s  %.2f ms/section  full rebuild %s ms',
-      world.perObjectCollision == nil and '?' or (world.perObjectCollision and 'per-section' or 'FULL'),
-      world.lastSectionCollisionMs or 0, world.lastCollisionMs and string.format('%.0f', world.lastCollisionMs) or '-')
+    lines[3] = string.format('collision %s, last rebuild %s ms (x%d)',
+      world.hasPendingCollision() and 'pending' or 'up to date',
+      world.lastCollisionMs and string.format('%.0f', world.lastCollisionMs) or '-', world.collisionReloads)
   end
   return lines
 end
@@ -391,9 +441,21 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   world.update(dtReal)
 
+  viewportTimer = viewportTimer + dtReal
+  if viewportTimer > 1 and net.isConnected() then
+    viewportTimer = 0
+    local w, h = viewportSize()
+    if w > 0 and (w ~= viewport.w or h ~= viewport.h) then
+      viewport.w, viewport.h = w, h
+      net.send({ t = 'viewport', vw = w, vh = h })
+    end
+    pushOverlayState()
+  end
+
   local pose = poseNow()
   -- Steve stays visible standing where you left him while you drive
   player.visibleThird = ready and pose ~= nil and (M.thirdPerson or not active)
+  player.visibleFirst = false
   player.updateThird(pose, ctx)
   entities.update(now)
   vehicles.drawFlashes(now)
@@ -438,11 +500,19 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     drawTarget()
   end
 
-  hud.draw({ active = active, hud = hudState, status = statusLines() })
+  hud.drawStatus(statusLines())
 end
 
 local function onExtensionLoaded()
-  log('I', 'beamcraft', 'BeamCraft loaded')
+  -- a reload whose unload failed leaves meshes behind: sweep anything of ours
+  local n = 0
+  for _, name in ipairs(scenetree.findClassObjects('ProceduralMesh') or {}) do
+    if name:find('^beamcraft_') then
+      local o = scenetree.findObject(name)
+      if o then o:delete() n = n + 1 end
+    end
+  end
+  log('I', 'beamcraft', 'BeamCraft loaded' .. (n > 0 and (' (removed ' .. n .. ' stale meshes)') or ''))
 end
 
 local function onExtensionUnloaded()

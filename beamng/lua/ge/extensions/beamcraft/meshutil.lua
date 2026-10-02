@@ -34,8 +34,9 @@ end
 
 M.IDENTITY = { 0, 0, 0, 1 }
 
--- Torque's QuatF may use the conjugate convention; flip this if models rotate backwards.
-M.conjugate = false
+-- Torque's QuatF is the conjugate of the Hamilton convention used here (measured:
+-- a +90 deg turn about Z came out as -90), so conjugate on the way in.
+M.conjugate = true
 
 function M.setXform(obj, px, py, pz, q)
   local x, y, z, w = q[1], q[2], q[3], q[4]
@@ -178,7 +179,12 @@ end
 
 local known, pending = {}, {}
 
+-- bumped whenever material definitions change shape, so a running game gets fresh
+-- objects instead of keeping the old ones
+M.suffix = '_r2'
+
 function M.material(name, def)
+  name = name .. M.suffix
   if known[name] or pending[name] then return name end
   def.name, def.mapTo, def.class = name, name, 'Material'
   def.version = def.version or 1.5
@@ -192,9 +198,12 @@ function M.textureMaterial(name, texture, kind, ground)
     Stages = { { baseColorMap = texture, roughnessFactor = 0.92, metallicFactor = 0 }, {}, {}, {} },
     groundType = ground or 'ROCK', materialTag0 = 'beamcraft', castShadows = true,
   }
+  -- v1.5 materials take alpha from opacityMap, not from the colour map's alpha
   if kind == 'cutout' then
+    def.Stages[1].opacityMap = texture
     def.alphaTest, def.alphaRef, def.doubleSided = true, 110, true
   elseif kind == 'translucent' then
+    def.Stages[1].opacityMap = texture
     def.translucent, def.translucentBlendOp, def.translucentZWrite, def.doubleSided = true, 'LerpAlpha', false, true
   end
   return M.material(name, def)

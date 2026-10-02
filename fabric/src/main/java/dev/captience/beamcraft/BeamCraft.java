@@ -36,9 +36,13 @@ public class BeamCraft implements ModInitializer {
 		});
 		ServerLifecycleEvents.SERVER_STOPPING.register(BlockSync::onServerStopping);
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
-			if (++saveTimer >= 200) {
+			if (++saveTimer >= 600) {
 				saveTimer = 0;
-				BlockSync.saveIndex(server);
+				// the backend may get killed rather than quit: keep what was built on disk
+				if (BlockSync.consumeDirty()) {
+					BlockSync.saveIndex(server);
+					server.saveEverything(true, false, false);
+				}
 			}
 		});
 	}

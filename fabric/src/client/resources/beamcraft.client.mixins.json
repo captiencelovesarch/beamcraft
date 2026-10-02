@@ -6,10 +6,16 @@
 		"FramerateLimitTrackerMixin",
 		"GameRendererMixin",
 		"KeyMappingAccessor",
+		"KeyboardHandlerInvoker",
 		"MinecraftPickMixin",
+		"MouseHandlerInvoker",
 		"MouseHandlerMixin",
 		"WorldOpenFlowsMixin"
 	],
-	"injectors": { "defaultRequire": 1 },
-	"overwrites": { "requireAnnotations": true }
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
 }

@@ -12,9 +12,12 @@ local M = {}
 
 -- tunables
 M.rebuildBudgetMs = 4         -- max milliseconds of meshing per frame
-M.collisionDelay = 0.15       -- coalesce global collision rebuilds (fallback path only)
-M.lastSectionCollisionMs = nil -- cost of the latest per-section collision update
-M.perObjectCollision = nil     -- nil = untested, true/false once known
+M.collisionDelay = 0.15       -- coalesce collision rebuilds (seconds)
+M.minRebuildInterval = 1.5    -- never rebuild more often than this, unless forced
+-- BeamNG has no per-object collision from Lua: a rebuild is the whole level (~0.1-0.3 s,
+-- a visible hitch). Steve doesn't need it (Minecraft does his collision), only cars do,
+-- so main.lua decides when it's worth it: shouldRebuildCollision(dirtyCentres) -> bool
+M.shouldRebuildCollision = nil
 M.flipWinding = true          -- MC quads are CCW-from-outside; Torque wants CW
 M.lastCollisionMs = nil       -- measured cost of the latest reloadCollision
 M.collisionReloads = 0
@@ -26,6 +29,8 @@ local dirtyQueue = {}         -- array of section keys to rebuild
 local dirtySet = {}
 local collisionPending = false
 local collisionTimer = 0
+local sinceRebuild = 1e9
+local dirtyCentres = {}       -- BeamNG positions of sections changed since the last rebuild
 local atlas                   -- { dir=, hash=, pages= }
 local materialsReady = false
 local objCounter = 0
@@ -164,6 +169,22 @@ local function deleteObjs(sec)
   sec.objs = {}
 end
 
+function M.hasPendingCollision() return collisionPending end
+
+-- rebuild BeamNG's collision now if anything changed (e.g. when you get back in a car)
+function M.rebuildCollisionNow()
+  if not collisionPending then return end
+  collisionPending = false
+  collisionTimer = 0
+  sinceRebuild = 0
+  dirtyCentres = {}
+  local ct = hptimer()
+  be:reloadCollision()
+  M.lastCollisionMs = ct:stop()
+  M.collisionReloads = M.collisionReloads + 1
+  if M.onCollisionReloaded then M.onCollisionReloaded() end
+end
+
 function M.clear()
   for _, sec in pairs(sections) do deleteObjs(sec) end
   sections, dirtyQueue, dirtySet = {}, {}, {}
@@ -252,31 +273,15 @@ local function buildSection(sec)
   return groups, missing
 end
 
--- Give one section's mesh its own physics collision. ProceduralMesh has
--- updatePhysicsCollision(), which registers just that mesh; the global
--- be:reloadCollision() rebuilds the whole level (~0.1-0.3 s, a visible hitch).
-function M.updateObjectCollision(obj)
-  if M.perObjectCollision ~= false then
-    local t = hptimer()
-    local ok, err = pcall(function() obj:updatePhysicsCollision() end)
-    if ok then
-      M.perObjectCollision = true
-      M.lastSectionCollisionMs = t:stop()
-      return
-    end
-    log('W', 'beamcraft.world', 'updatePhysicsCollision unavailable, falling back to full rebuilds: ' .. tostring(err))
-    M.perObjectCollision = false
-  end
-  collisionPending = true
-end
-
 local function rebuildSection(key)
   local sec = sections[key]
   if not sec then return false end
   if sec.count <= 0 then
     deleteObjs(sec)
     sections[key] = nil
-    if not M.perObjectCollision then collisionPending = true end
+    collisionPending = true
+    local bx, by, bz = coords.mcToBng(sec.sx * 16 + 8, sec.sy * 16 + 8, sec.sz * 16 + 8)
+    dirtyCentres[#dirtyCentres + 1] = vec3(bx, by, bz)
     return true
   end
   if not atlas then return false end
@@ -306,9 +311,10 @@ local function rebuildSection(key)
         sec.objs[cflag] = obj
       end
       obj:createMesh({ list })
-      if cflag == 1 then M.updateObjectCollision(obj) end
     end
   end
+  collisionPending = true
+  dirtyCentres[#dirtyCentres + 1] = vec3(bx + 8, by - 8, bz + 8)
   return true
 end
 
@@ -323,16 +329,12 @@ function M.update(dt)
     if t:stop() > budget then break end
   end
 
+  sinceRebuild = sinceRebuild + dt
   if collisionPending then
     collisionTimer = collisionTimer + dt
-    if collisionTimer >= M.collisionDelay and #dirtyQueue == 0 then
-      collisionPending = false
-      collisionTimer = 0
-      local ct = hptimer()
-      be:reloadCollision()
-      M.lastCollisionMs = ct:stop()
-      M.collisionReloads = M.collisionReloads + 1
-      if M.onCollisionReloaded then M.onCollisionReloaded() end
+    if collisionTimer >= M.collisionDelay and #dirtyQueue == 0 and sinceRebuild >= M.minRebuildInterval
+      and (not M.shouldRebuildCollision or M.shouldRebuildCollision(dirtyCentres)) then
+      M.rebuildCollisionNow()
     end
   end
 end

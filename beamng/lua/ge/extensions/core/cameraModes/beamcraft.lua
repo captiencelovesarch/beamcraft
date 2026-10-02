@@ -74,16 +74,21 @@ function C:update(data)
   local cp = math.cos(self.pitch)
   fwd:set(math.sin(self.yaw) * cp, math.cos(self.yaw) * cp, math.sin(self.pitch))
   local camPos = self.pos
-  if bc and bc.thirdPerson then
-    camPos = self.pos - fwd * 4
-    local d = castRayStatic(self.pos, fwd * -1, 4)
-    if d and d < 4 then camPos = self.pos - fwd * math.max(0.3, d - 0.2) end
+  local lookDir = fwd
+  local mode = bc and bc.cameraMode or 0
+  if mode == 1 or mode == 2 then
+    -- Minecraft's F5 views: 1 = behind Steve, 2 = in front of him looking back
+    local away = mode == 1 and (fwd * -1) or fwd
+    local d = castRayStatic(self.pos, away, 4)
+    local dist = (d and d < 4) and math.max(0.3, d - 0.2) or 4
+    camPos = self.pos + away * dist
+    if mode == 2 then lookDir = fwd * -1 end
   end
 
   if bc and bc.updateFirstPerson then bc.updateFirstPerson(self.pos, self.yaw, self.pitch, dt) end
 
   data.res.pos:set(camPos)
-  data.res.rot = quatFromDir(fwd, up)
+  data.res.rot = quatFromDir(lookDir, up)
   data.res.fov = self.fov
   data.res.targetPos:set(self.pos.x + fwd.x * 10, self.pos.y + fwd.y * 10, self.pos.z + fwd.z * 10)
   return true
