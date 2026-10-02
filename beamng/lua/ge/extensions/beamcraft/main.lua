@@ -15,6 +15,7 @@ local net = require('beamcraft/net')
 local world = require('beamcraft/world')
 local terrain = require('beamcraft/terrain')
 local hud = require('beamcraft/hud')
+local devconsole = require('beamcraft/devconsole')
 
 M.thirdPerson = false
 
@@ -54,6 +55,7 @@ local function sendHello()
 end
 
 function M.setMoveInput(f, b, l, r)
+  if hud.pickerOpen then return end
   f, b, l, r = clamp(f, 0, 1), clamp(b, 0, 1), clamp(l, 0, 1), clamp(r, 0, 1)
   if f ~= input.f or b ~= input.b or l ~= input.l or r ~= input.r then
     input.f, input.b, input.l, input.r = f, b, l, r
@@ -69,9 +71,33 @@ function M.setLook(yaw, pitch)
   end
 end
 
+local function setPicker(open)
+  hud.pickerOpen = open
+  if lockMouse then lockMouse(not open) end
+  if open then
+    -- let go of everything so Steve doesn't keep walking while you browse
+    input.f, input.b, input.l, input.r = 0, 0, 0, 0
+    input.jump, input.sneak, input.sprint, input.attack, input.use = 0, 0, 0, 0, 0
+    inputDirty = true
+  end
+end
+
+hud.onPick = function(id) net.send({ t = 'give', id = id }) end
+hud.onClose = function() setPicker(false) end
+
+function M.isPickerOpen() return hud.pickerOpen end
+
+-- run a Minecraft command as Steve, e.g. beamcraft_main.cmd('gamemode survival')
+function M.cmd(str) net.send({ t = 'cmd', c = str }) end
+
 function M.key(name, value)
   if not active then return end
   local v = (value or 0) > 0.5 and 1 or 0
+  if name == 'inventory' then
+    if v == 1 then setPicker(not hud.pickerOpen) end
+    return
+  end
+  if hud.pickerOpen then return end
   if name == 'jump' or name == 'sneak' or name == 'sprint' or name == 'attack' or name == 'use' then
     if input[name] ~= v then
       input[name] = v
@@ -85,7 +111,7 @@ function M.key(name, value)
 end
 
 function M.slot(n)
-  if active then events[#events + 1] = { k = 'slot', n = n } end
+  if active and not hud.pickerOpen then events[#events + 1] = { k = 'slot', n = n } end
 end
 
 function M.scroll(value)
@@ -180,6 +206,7 @@ end
 function M.exit()
   if not active then return end
   active = false
+  hud.pickerOpen = false
   net.send({ t = 'exit' })
   if lockMouse then lockMouse(false) end
   -- back to the vehicle camera if there is a vehicle, else the free camera
@@ -236,6 +263,7 @@ handlers.p = function(m)
 end
 
 handlers.hud = function(m) hudState = m end
+handlers.items = function(m) hud.items = { blocks = m.blocks or {}, other = m.other or {} } end
 handlers.chat = function(m) hud.addChat(m.m) end
 handlers.look = function(m)
   -- Minecraft changed our look (teleport/respawn): adopt it
@@ -297,6 +325,7 @@ end
 local function onUpdate(dtReal, dtSim, dtRaw)
   now = now + dtReal
   hud.now = now
+  devconsole.update()
 
   local msgs = net.update(dtReal, function()
     ready = false
@@ -353,6 +382,7 @@ local function onExtensionUnloaded()
   if active then M.exit() end
   world.clear()
   net.close('extension unloaded')
+  devconsole.close()
 end
 
 local function onClientStartMission()

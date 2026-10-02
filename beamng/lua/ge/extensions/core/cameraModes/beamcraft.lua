@@ -50,13 +50,16 @@ function C:update(data)
   local dt = data.dt
   if dt <= 0 then dt = 1e-4 end
 
-  self.yaw = self.yaw + MoveManager.yawRelative * self.mouseSens
-           + (MoveManager.yawRight - MoveManager.yawLeft) * self.keyLookRate * dt
-  self.pitch = self.pitch + MoveManager.pitchRelative * self.mouseSens
-           + (MoveManager.pitchUp - MoveManager.pitchDown) * self.keyLookRate * dt
-  self.pitch = clamp(self.pitch, -1.55, 1.55)
-
   local bc = beamcraft_main
+  local looking = not (bc and bc.isPickerOpen and bc.isPickerOpen())
+  if looking then
+    self.yaw = self.yaw + MoveManager.yawRelative * self.mouseSens
+             + (MoveManager.yawRight - MoveManager.yawLeft) * self.keyLookRate * dt
+    self.pitch = self.pitch + MoveManager.pitchRelative * self.mouseSens
+               + (MoveManager.pitchUp - MoveManager.pitchDown) * self.keyLookRate * dt
+    self.pitch = clamp(self.pitch, -1.55, 1.55)
+  end
+
   if bc then
     bc.setMoveInput(
       MoveManager.forward + math.max(0, MoveManager.absYAxis or 0),

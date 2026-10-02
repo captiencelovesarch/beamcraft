@@ -34,8 +34,51 @@ local function shadowText(dl, x, y, str, c, size)
   text(dl, x, y, str, c, size)
 end
 
+------------------------------------------------------------------------------
+-- creative item picker (E): search Minecraft's item list, click to put an item
+-- in the selected hotbar slot
+------------------------------------------------------------------------------
+
+local ffi = require('ffi')
+M.pickerOpen = false
+M.items = { blocks = {}, other = {} }
+M.onPick = nil                 -- function(itemId)
+local search = im.ArrayChar(64, '')
+local showAll = im.BoolPtr(false)
+
+local function drawPicker()
+  if not M.pickerOpen then return end
+  local vp = im.GetMainViewport()
+  im.SetNextWindowPos(im.ImVec2(vp.Pos.x + vp.Size.x * 0.5, vp.Pos.y + vp.Size.y * 0.45), im.Cond_Appearing, im.ImVec2(0.5, 0.5))
+  im.SetNextWindowSize(im.ImVec2(420, 520), im.Cond_FirstUseEver)
+  local open = im.BoolPtr(true)
+  if im.Begin('BeamCraft items##bcpicker', open, im.WindowFlags_NoCollapse) then
+    im.Text('Click an item to put it in your selected hotbar slot.')
+    im.SetNextItemWidth(260)
+    im.InputText('##bcsearch', search)
+    im.SameLine()
+    im.Checkbox('non-blocks', showAll)
+    local q = ffi.string(search):lower()
+    im.BeginChild1('##bclist')
+    local function list(ids)
+      for _, id in ipairs(ids) do
+        local name = id:gsub('^minecraft:', '')
+        if q == '' or name:find(q, 1, true) then
+          if im.Selectable1(name .. '##' .. id, false) and M.onPick then M.onPick(id) end
+        end
+      end
+    end
+    list(M.items.blocks or {})
+    if showAll[0] then list(M.items.other or {}) end
+    im.EndChild()
+  end
+  im.End()
+  if not open[0] and M.onClose then M.onClose() end
+end
+
 -- state: { active, connected, ready, hud = {...}, status = {lines} }
 function M.draw(state)
+  drawPicker()
   local vp = im.GetMainViewport()
   if not vp then return end
   local dl = im.GetForegroundDrawList1()
