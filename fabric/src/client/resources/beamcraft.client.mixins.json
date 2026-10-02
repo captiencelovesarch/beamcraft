@@ -3,11 +3,13 @@
 	"package": "dev.captience.beamcraft.client.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
+		"AbstractClientPlayerMixin",
 		"FramerateLimitTrackerMixin",
 		"GameRendererMixin",
 		"KeyMappingAccessor",
 		"KeyboardHandlerInvoker",
 		"MinecraftPickMixin",
+		"MinecraftWindowMixin",
 		"MouseHandlerInvoker",
 		"MouseHandlerMixin",
 		"WorldOpenFlowsMixin"

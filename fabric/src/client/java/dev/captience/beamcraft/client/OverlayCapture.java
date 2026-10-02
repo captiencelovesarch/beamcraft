@@ -25,7 +25,8 @@ import org.slf4j.LoggerFactory;
 public final class OverlayCapture {
 	private static final Logger LOG = LoggerFactory.getLogger("BeamCraft/Overlay");
 	private static final int SLOTS = 3;
-	private static final long MIN_INTERVAL_NS = Long.getLong("beamcraft.overlayIntervalMs", 33L) * 1_000_000L; // ~30 fps default
+	// capture every frame; the frame rate itself follows BeamNG's (BeamCraftClient.targetFps)
+	private static final long MIN_INTERVAL_NS = Long.getLong("beamcraft.overlayIntervalMs", 0L) * 1_000_000L;
 
 	private static final GpuBuffer[] BUFFERS = new GpuBuffer[SLOTS];
 	private static long bufferSize;
@@ -52,7 +53,7 @@ public final class OverlayCapture {
 	public static void afterFrame(RenderTarget target) {
 		if (!BeamCraftClient.HEADLESS || !OverlayServer.hasViewers()) return;
 		long now = System.nanoTime();
-		if (now - lastCapture < MIN_INTERVAL_NS || IN_FLIGHT.get() >= 2 || ENCODE_QUEUE.get() >= 2) return;
+		if (now - lastCapture < MIN_INTERVAL_NS || IN_FLIGHT.get() >= 3 || ENCODE_QUEUE.get() >= 3) return;
 		GpuTexture tex = target.getColorTexture();
 		if (tex == null) return;
 		final int w = target.width, h = target.height;

@@ -43,10 +43,11 @@ end
 local defs
 
 -- called when Minecraft sends the gui assets (skin texture)
-function M.setSkin(dir, slim)
+function M.setSkin(dir, slim, file)
   M.destroy()
-  local name = 'bc_skin_' .. tostring(dir):gsub('[^%w]', '_')
-  skin = { material = mu.textureMaterial(name, dir .. '/skin.png', 'cutout'), slim = slim }
+  file = file or 'skin.png'
+  local name = 'bc_skin_' .. (tostring(dir) .. '_' .. file):gsub('[^%w]', '_')
+  skin = { material = mu.textureMaterial(name, dir .. '/' .. file, 'cutout'), slim = slim }
   mu.flushMaterials()
   defs = partDefs(slim)
 end

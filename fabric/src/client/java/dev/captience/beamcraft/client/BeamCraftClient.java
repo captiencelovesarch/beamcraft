@@ -64,6 +64,12 @@ public class BeamCraftClient implements ClientModInitializer {
 		ResourceKey.create(Registries.WORLD_PRESET, Identifier.fromNamespaceAndPath("beamcraft", "beamng"));
 
 	private static volatile boolean controlling;
+	private static volatile int targetFps = 144;
+
+	/** Frame rate the hidden client renders (and streams its overlay) at: BeamNG's own. */
+	public static int targetFps() {
+		return targetFps;
+	}
 
 	public static boolean isControlling() {
 		return controlling;
@@ -115,7 +121,9 @@ public class BeamCraftClient implements ClientModInitializer {
 	}
 
 	private void configure(Minecraft mc) {
+		CustomSkin.load(mc);
 		Options o = mc.options;
+		o.enableVsync().set(false);
 		o.pauseOnLostFocus = false;
 		o.onboardAccessibility = false;
 		o.tutorialStep = net.minecraft.client.tutorial.TutorialSteps.NONE;
@@ -241,6 +249,8 @@ public class BeamCraftClient implements ClientModInitializer {
 			}
 			case "give" -> giveToSelected(mc, m.get("id").getAsString());
 			case "viewport" -> applyViewport(mc, m.get("vw").getAsInt(), m.get("vh").getAsInt());
+			case "fps" -> targetFps = Math.max(30, Math.min(360, (int) Math.round(num(m, "fps") * 1.1)));
+			case "time" -> setTimeOfDay(mc, num(m, "tod"));
 			case "oin" -> OverlayServer.INPUT.add(m.getAsJsonObject("e")); // overlay input relayed by BeamNG's Lua
 			case "hurt" -> onHurt(mc, m);
 			case "veh" -> {
@@ -412,6 +422,19 @@ public class BeamCraftClient implements ClientModInitializer {
 		runServerCommand(mc, String.format(Locale.ROOT, "tp %s %.3f %.3f %.3f %.2f 0", p.getGameProfile().name(), x, y, z, yaw));
 	}
 
+	private long lastDayTime = -1;
+
+	/**
+	 * BeamNG's time of day (0 = noon, 0.5 = midnight) as Minecraft's (6000 = noon), so the
+	 * hand and held items are lit like the world around them.
+	 */
+	private void setTimeOfDay(Minecraft mc, double tod) {
+		long dayTime = Math.floorMod(Math.round(6000 + tod * 24000), 24000L);
+		if (lastDayTime >= 0 && Math.abs(dayTime - lastDayTime) < 50) return;
+		lastDayTime = dayTime;
+		runServerCommand(mc, "time set " + dayTime);
+	}
+
 	private void release(Minecraft mc) {
 		Options o = mc.options;
 		for (KeyMapping k : new KeyMapping[] {o.keyUp, o.keyDown, o.keyLeft, o.keyRight, o.keyJump, o.keyShift, o.keySprint, o.keyAttack, o.keyUse}) {
@@ -457,7 +480,8 @@ public class BeamCraftClient implements ClientModInitializer {
 			.append(",\"sw\":").append(r4(p.getAttackAnim(1f)))
 			.append(",\"cr\":").append(p.isCrouching() ? 1 : 0)
 			.append(",\"scr\":").append(mc.gui.screen() != null ? 1 : 0)
-			.append(",\"cam\":").append(mc.options.getCameraType().ordinal());
+			.append(",\"cam\":").append(mc.options.getCameraType().ordinal())
+			.append(",\"fps\":").append(mc.getFps());
 		ItemStack held = p.getMainHandItem();
 		if (!held.isEmpty()) {
 			String hid = BuiltInRegistries.ITEM.getKey(held.getItem()).toString();

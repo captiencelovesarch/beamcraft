@@ -81,12 +81,25 @@ public final class GuiExport {
 		}
 		msg.add("sizes", sizes);
 
-		// the player's skin (the default skin for the dev account)
-		var skin = mc.getSkinManager().createLookup(mc.getGameProfile(), false).get();
-		Identifier tex = skin.body().texturePath();
-		BufferedImage skinImg = read(rm, tex);
+		// the player's skin: the custom one if set, else the account's default
+		var skin = CustomSkin.get() != null ? CustomSkin.get() : mc.getSkinManager().createLookup(mc.getGameProfile(), false).get();
+		BufferedImage skinImg = null;
+		if (CustomSkin.file() != null) {
+			try {
+				skinImg = ImageIO.read(CustomSkin.file().toFile());
+			} catch (IOException e) {
+				LOG.warn("Unreadable custom skin", e);
+			}
+		}
+		if (skinImg == null) skinImg = read(rm, skin.body().texturePath());
 		if (skinImg == null) skinImg = read(rm, Identifier.withDefaultNamespace("textures/entity/player/wide/steve.png"));
-		if (skinImg != null) write(upscale(skinImg, 4), out.resolve("skin.png"));
+		if (skinImg != null) {
+			// BeamNG caches textures by path: name the file after its content
+			int[] argb = skinImg.getRGB(0, 0, skinImg.getWidth(), skinImg.getHeight(), null, 0, skinImg.getWidth());
+			String skinFile = "skin_" + Integer.toHexString(java.util.Arrays.hashCode(argb)) + ".png";
+			write(upscale(skinImg, 4), out.resolve(skinFile));
+			msg.addProperty("skin", skinFile);
+		}
 		msg.addProperty("slim", skin.model().name().equalsIgnoreCase("slim"));
 		return msg;
 	}

@@ -38,6 +38,7 @@ local screenOpen = false      -- a Minecraft screen (inventory, chat...) is open
 local overlaySent = nil
 local viewport = { w = 0, h = 0 }
 local viewportTimer = 0
+local frames, frameTime = 0, 0
 
 local ctx = { world = world, iconPath = hud.iconPath }
 
@@ -213,6 +214,7 @@ local function poseNow()
   }
 end
 M.poseNow = poseNow
+function M.lastPose() return curSnap end
 
 -- interpolated eye position in BeamNG coords, or nil before the first snapshot
 function M.getEyePos()
@@ -343,7 +345,7 @@ handlers.blocks = function(m) world.setBlocks(m) end
 handlers.clear = function(m) world.clear() terrain.reset() entities.clear() end
 handlers.gui = function(m)
   hud.gui = m
-  player.setSkin(m.dir, m.slim)
+  player.setSkin(m.dir, m.slim, m.skin)
 end
 handlers.icons = function(m) hud.iconsDir = m.dir end
 handlers.ents = function(m) entities.snapshot(m, now, ctx) end
@@ -429,7 +431,8 @@ local function statusLines()
   if net.isConnected() then
     lines[2] = string.format('blocks %d  sections %d  states %d  dirty %d',
       world.getTotalBlocks(), world.getSectionCount(), world.getStateCount(), world.getDirtyCount())
-    lines[4] = string.format('overlay patches %d (%.1f MB)', overlay.patches, overlay.bytes / 1048576)
+    lines[4] = string.format('overlay patches %d (%.1f MB)  BeamNG %.0f fps, Minecraft %s fps', overlay.patches,
+      overlay.bytes / 1048576, M.fps or 0, tostring(curSnap and curSnap.fps or '?'))
     lines[3] = string.format('collision %s, last rebuild %s ms (x%d)',
       world.hasPendingCollision() and 'pending' or 'up to date',
       world.lastCollisionMs and string.format('%.0f', world.lastCollisionMs) or '-', world.collisionReloads)
@@ -455,9 +458,18 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   world.update(dtReal)
   overlay.update(dtReal, active and net.isConnected())
 
+  frames, frameTime = frames + 1, frameTime + dtReal
   viewportTimer = viewportTimer + dtReal
   if viewportTimer > 1 and net.isConnected() then
     viewportTimer = 0
+    -- Minecraft renders (and streams its overlay) at our frame rate, and shares our time of day
+    if frameTime > 0 then
+      M.fps = frames / frameTime
+      net.send({ t = 'fps', fps = M.fps })
+    end
+    frames, frameTime = 0, 0
+    local tod = core_environment and core_environment.getTimeOfDay and core_environment.getTimeOfDay()
+    if tod and tod.time then net.send({ t = 'time', tod = tod.time }) end
     local w, h = viewportSize()
     if w > 0 and (w ~= viewport.w or h ~= viewport.h) then
       viewport.w, viewport.h = w, h
@@ -545,7 +557,7 @@ local function onClientStartMission()
   terrain.reset()
   entities.clear()
   player.destroy()
-  if hud.gui then player.setSkin(hud.gui.dir, hud.gui.slim) end
+  if hud.gui then player.setSkin(hud.gui.dir, hud.gui.slim, hud.gui.skin) end
   ready = false
   curSnap, prevSnap = nil, nil
   if net.isConnected() then sendHello() end

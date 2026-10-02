@@ -34,7 +34,13 @@ public abstract class GameRendererMixin {
 		target = "Lnet/minecraft/client/renderer/LevelRenderer;render(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/renderer/state/level/CameraRenderState;Lorg/joml/Matrix4fc;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;Lorg/joml/Vector4f;Z)V"))
 	private void beamcraft$skipWorld(LevelRenderer renderer, GraphicsResourceAllocator allocator, DeltaTracker deltaTracker,
 		boolean renderOutline, CameraRenderState cameraState, Matrix4fc modelView, GpuBufferSlice fog, Vector4f fogColor, boolean sky) {
-		if (!BeamCraftClient.HEADLESS) renderer.render(allocator, deltaTracker, renderOutline, cameraState, modelView, fog, fogColor, sky);
+		if (!BeamCraftClient.HEADLESS) {
+			renderer.render(allocator, deltaTracker, renderOutline, cameraState, modelView, fog, fogColor, sky);
+			return;
+		}
+		// The world pass is what switches lighting to the level's; without it the hand
+		// would be lit with the GUI's item lighting left over from the previous frame.
+		((GameRenderer) (Object) this).lighting().setupFor(com.mojang.blaze3d.platform.Lighting.Entry.LEVEL);
 	}
 
 	@ModifyArg(method = "render", at = @At(value = "INVOKE",
