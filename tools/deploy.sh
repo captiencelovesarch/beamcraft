@@ -8,9 +8,12 @@ SRC="$(cd "$(dirname "$0")/../beamng" && pwd)"
 USER_DIR="$HOME/.local/share/BeamNG/BeamNG.drive/current"
 DST="$USER_DIR/mods/unpacked/beamcraft"
 mkdir -p "$DST"
-rm -rf "$DST"
-mkdir -p "$DST"
+# overwrite in place, then drop files that no longer exist in the source: never
+# remove the folder itself, or a running BeamNG unmounts the mod
 cp -a "$SRC/." "$DST/"
+(cd "$DST" && find . -type f) | while read -r f; do
+  [[ -e "$SRC/$f" ]] || rm -f "$DST/$f"
+done
 if [[ "${1:-}" == "--dev" ]]; then
   mkdir -p "$USER_DIR/beamcraft"
   touch "$USER_DIR/beamcraft/dev_eval"

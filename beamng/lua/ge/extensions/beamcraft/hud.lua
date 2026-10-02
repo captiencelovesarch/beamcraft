@@ -21,12 +21,10 @@ function M.addChat(text)
   while #M.chat > 8 do table.remove(M.chat, 1) end
 end
 
+-- (sized text needs a font handle this imgui binding doesn't hand out; draw at the
+-- default size for now)
 local function text(dl, x, y, str, c, size)
-  if size then
-    im.ImDrawList_AddText2(dl, im.GetFont(), size, im.ImVec2(x, y), c, str)
-  else
-    im.ImDrawList_AddText1(dl, im.ImVec2(x, y), c, str)
-  end
+  im.ImDrawList_AddText1(dl, im.ImVec2(x, y), c, str)
 end
 
 local function shadowText(dl, x, y, str, c, size)

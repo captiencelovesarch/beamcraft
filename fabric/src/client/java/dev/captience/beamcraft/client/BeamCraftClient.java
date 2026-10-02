@@ -79,6 +79,7 @@ public class BeamCraftClient implements ClientModInitializer {
 	private boolean freshWorld;
 	private ModelExport export;
 	private CompletableFuture<Void> atlasJob;
+	private Path atlasDir;
 	private boolean atlasSent;
 	private final Set<Integer> sentStates = new HashSet<>();
 	private String lastHud = "";
@@ -438,8 +439,9 @@ public class BeamCraftClient implements ClientModInitializer {
 	private void manageAtlas(Minecraft mc) {
 		if (atlasSent || userPath == null || mc.gui.overlay() != null) return;
 		if (export == null) export = ModelExport.build(mc);
-		if (atlasJob == null) {
-			Path dir = userPath.resolve("beamcraft").resolve("atlas");
+		Path dir = userPath.resolve("beamcraft").resolve("atlas");
+		if (atlasJob == null || !dir.equals(atlasDir)) {
+			atlasDir = dir;
 			ModelExport ex = export;
 			atlasJob = CompletableFuture.runAsync(() -> {
 				try {

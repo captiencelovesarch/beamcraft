@@ -122,6 +122,12 @@ function M.setAtlas(msg)
   if changed then
     knownMaterials, pendingMaterials = {}, {}
     for key in pairs(sections) do markDirty(key) end
+  else
+    -- same atlas re-announced (e.g. pages just got written): re-read the textures
+    for name in pairs(knownMaterials) do
+      local mat = scenetree.findObject(name)
+      if mat then pcall(function() mat:reload() end) end
+    end
   end
   log('I', 'beamcraft.world', string.format('atlas %s: %d page(s)', tostring(msg.hash), msg.pages or -1))
 end
