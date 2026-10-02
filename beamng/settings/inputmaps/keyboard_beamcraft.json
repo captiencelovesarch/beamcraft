@@ -1,0 +1,20 @@
+{
+  "bindings":[
+    {"control":"alt b", "action":"beamcraft_toggle"},
+    {"control":"space", "action":"beamcraft_jump"},
+    {"control":"lshift", "action":"beamcraft_sneak"},
+    {"control":"lcontrol", "action":"beamcraft_sprint"},
+    {"control":"q", "action":"beamcraft_drop"},
+    {"control":"e", "action":"beamcraft_inventory"},
+    {"control":"f5", "action":"beamcraft_view"},
+    {"control":"1", "action":"beamcraft_slot1"},
+    {"control":"2", "action":"beamcraft_slot2"},
+    {"control":"3", "action":"beamcraft_slot3"},
+    {"control":"4", "action":"beamcraft_slot4"},
+    {"control":"5", "action":"beamcraft_slot5"},
+    {"control":"6", "action":"beamcraft_slot6"},
+    {"control":"7", "action":"beamcraft_slot7"},
+    {"control":"8", "action":"beamcraft_slot8"},
+    {"control":"9", "action":"beamcraft_slot9"}
+  ]
+}

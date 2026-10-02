@@ -1,0 +1,11 @@
+{
+	"required": true,
+	"package": "dev.captience.beamcraft.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [
+		"LevelCollisionMixin",
+		"ServerLevelMixin"
+	],
+	"injectors": { "defaultRequire": 1 },
+	"overwrites": { "requireAnnotations": true }
+}

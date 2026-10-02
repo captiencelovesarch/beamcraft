@@ -1,0 +1,15 @@
+{
+	"required": true,
+	"package": "dev.captience.beamcraft.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"FramerateLimitTrackerMixin",
+		"GameRendererMixin",
+		"KeyMappingAccessor",
+		"MinecraftPickMixin",
+		"MouseHandlerMixin",
+		"WorldOpenFlowsMixin"
+	],
+	"injectors": { "defaultRequire": 1 },
+	"overwrites": { "requireAnnotations": true }
+}

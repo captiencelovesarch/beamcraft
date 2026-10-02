@@ -1,0 +1,8 @@
+{
+  "bindings":[
+    {"control":"button0", "action":"beamcraft_attack"},
+    {"control":"button1", "action":"beamcraft_use"},
+    {"control":"button2", "action":"beamcraft_pick"},
+    {"control":"zaxis", "action":"beamcraft_scroll"}
+  ]
+}

@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 1,
+	"id": "beamcraft",
+	"version": "${version}",
+	"name": "BeamCraft",
+	"description": "Play Minecraft inside BeamNG.drive. This mod runs the hidden Minecraft half: player physics, inventory and blocks, streamed to BeamNG.",
+	"authors": ["captience"],
+	"license": "MIT",
+	"environment": "*",
+	"entrypoints": {
+		"main": ["dev.captience.beamcraft.BeamCraft"],
+		"client": ["dev.captience.beamcraft.client.BeamCraftClient"]
+	},
+	"mixins": [
+		"beamcraft.mixins.json",
+		{ "config": "beamcraft.client.mixins.json", "environment": "client" }
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

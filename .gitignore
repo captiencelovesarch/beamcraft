@@ -1,0 +1,6 @@
+fabric/.gradle/
+fabric/build/
+fabric/run/
+fabric/bin/
+*.png.tmp
+__pycache__/
