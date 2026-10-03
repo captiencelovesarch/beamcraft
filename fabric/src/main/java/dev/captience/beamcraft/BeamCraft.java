@@ -30,12 +30,14 @@ public class BeamCraft implements ModInitializer {
 
 	@Override
 	public void onInitialize() {
+		VehicleTargets.register();
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			BlockSync.onServerStarted(server);
 			applyWorldRules(server);
 		});
 		ServerLifecycleEvents.SERVER_STOPPING.register(BlockSync::onServerStopping);
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
+			VehicleTargets.tick(server);
 			if (++saveTimer >= 600) {
 				saveTimer = 0;
 				// the backend may get killed rather than quit: keep what was built on disk

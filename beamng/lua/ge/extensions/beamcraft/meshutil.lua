@@ -82,27 +82,51 @@ end
 -- A Minecraft model box. Local axes: +X = character's right, +Y = forward, +Z = up.
 -- x0..x1 etc. in metres; u, v, w, h, d in texture pixels (Minecraft's box UV layout);
 -- texW/texH = texture size in pixels.
-function M.addUvBox(m, x0, y0, z0, x1, y1, z1, u, v, w, h, d, texW, texH)
+function M.addUvBox(m, x0, y0, z0, x1, y1, z1, u, v, w, h, d, texW, texH, pixelated)
   local function U(px) return px / texW end
   local function V(py) return py / texH end
+  local function face(tl, tr, br, bl, fu, fv, cols, rows, nx, ny, nz)
+    if not pixelated then
+      M.addQuad(m, tl, tr, br, bl, U(fu), V(fv), U(fu + cols), V(fv + rows), nx, ny, nz)
+      return
+    end
+    -- A constant UV at each source pixel's centre makes each little quad sample
+    -- one colour. BeamNG can use bilinear filtering without blurring pixel edges.
+    local function point(s, t)
+      return {
+        tl[1] * (1 - s) * (1 - t) + tr[1] * s * (1 - t) + br[1] * s * t + bl[1] * (1 - s) * t,
+        tl[2] * (1 - s) * (1 - t) + tr[2] * s * (1 - t) + br[2] * s * t + bl[2] * (1 - s) * t,
+        tl[3] * (1 - s) * (1 - t) + tr[3] * s * (1 - t) + br[3] * s * t + bl[3] * (1 - s) * t,
+      }
+    end
+    for row = 0, rows - 1 do
+      local t0, t1 = row / rows, (row + 1) / rows
+      for col = 0, cols - 1 do
+        local s0, s1 = col / cols, (col + 1) / cols
+        local uu, vv = U(fu + col + 0.5), V(fv + row + 0.5)
+        M.addQuad(m, point(s0, t0), point(s1, t0), point(s1, t1), point(s0, t1),
+          uu, vv, uu, vv, nx, ny, nz)
+      end
+    end
+  end
   -- front (+Y): viewer's left is the character's right (+X)
-  M.addQuad(m, { x1, y1, z1 }, { x0, y1, z1 }, { x0, y1, z0 }, { x1, y1, z0 },
-    U(u + d), V(v + d), U(u + d + w), V(v + d + h), 0, 1, 0)
+  face({ x1, y1, z1 }, { x0, y1, z1 }, { x0, y1, z0 }, { x1, y1, z0 },
+    u + d, v + d, w, h, 0, 1, 0)
   -- back (-Y)
-  M.addQuad(m, { x0, y0, z1 }, { x1, y0, z1 }, { x1, y0, z0 }, { x0, y0, z0 },
-    U(u + 2 * d + w), V(v + d), U(u + 2 * d + 2 * w), V(v + d + h), 0, -1, 0)
+  face({ x0, y0, z1 }, { x1, y0, z1 }, { x1, y0, z0 }, { x0, y0, z0 },
+    u + 2 * d + w, v + d, w, h, 0, -1, 0)
   -- character's right side (+X)
-  M.addQuad(m, { x1, y0, z1 }, { x1, y1, z1 }, { x1, y1, z0 }, { x1, y0, z0 },
-    U(u), V(v + d), U(u + d), V(v + d + h), 1, 0, 0)
+  face({ x1, y0, z1 }, { x1, y1, z1 }, { x1, y1, z0 }, { x1, y0, z0 },
+    u, v + d, d, h, 1, 0, 0)
   -- character's left side (-X)
-  M.addQuad(m, { x0, y1, z1 }, { x0, y0, z1 }, { x0, y0, z0 }, { x0, y1, z0 },
-    U(u + d + w), V(v + d), U(u + 2 * d + w), V(v + d + h), -1, 0, 0)
+  face({ x0, y1, z1 }, { x0, y0, z1 }, { x0, y0, z0 }, { x0, y1, z0 },
+    u + d + w, v + d, d, h, -1, 0, 0)
   -- top (+Z): front edge at the bottom of the texture rect
-  M.addQuad(m, { x1, y0, z1 }, { x0, y0, z1 }, { x0, y1, z1 }, { x1, y1, z1 },
-    U(u + d), V(v), U(u + d + w), V(v + d), 0, 0, 1)
+  face({ x1, y0, z1 }, { x0, y0, z1 }, { x0, y1, z1 }, { x1, y1, z1 },
+    u + d, v, w, d, 0, 0, 1)
   -- bottom (-Z)
-  M.addQuad(m, { x1, y1, z0 }, { x0, y1, z0 }, { x0, y0, z0 }, { x1, y0, z0 },
-    U(u + d + w), V(v), U(u + d + 2 * w), V(v + d), 0, 0, -1)
+  face({ x1, y1, z0 }, { x0, y1, z0 }, { x0, y0, z0 }, { x1, y0, z0 },
+    u + d + w, v, w, d, 0, 0, -1)
 end
 
 -- A flat, double-sided quad facing +Y, centred on the origin, size s.
@@ -165,7 +189,11 @@ function M.newObject(prefix, meshes)
   obj.canSave = false
   obj:registerObject(string.format('%s_%d', prefix, counter))
   scenetree.MissionGroup:add(obj.obj)
-  if meshes and #meshes > 0 then obj:createMesh({ meshes }) end
+  -- BeamNG uses the last mesh group for static collision. An explicit empty
+  -- collision group keeps these animated visuals out of collision rebuilds.
+  if meshes and #meshes > 0 then obj:createMesh({ meshes, {} }, false) end
+  -- disableCollision() removes ProceduralMesh from the render scene as well.
+  obj:enableCollision()
   return obj
 end
 
@@ -181,7 +209,7 @@ local known, pending = {}, {}
 
 -- bumped whenever material definitions change shape, so a running game gets fresh
 -- objects instead of keeping the old ones
-M.suffix = '_r2'
+M.suffix = '_r5'
 
 function M.material(name, def)
   name = name .. M.suffix
@@ -193,17 +221,18 @@ function M.material(name, def)
 end
 
 -- a material showing one texture; kind = 'solid' | 'cutout' | 'translucent'
-function M.textureMaterial(name, texture, kind, ground)
+function M.textureMaterial(name, texture, kind, ground, opacityTexture, matte)
   local def = {
-    Stages = { { baseColorMap = texture, roughnessFactor = 0.92, metallicFactor = 0 }, {}, {}, {} },
+    Stages = { { baseColorMap = texture, roughnessFactor = matte and 1 or 0.92, metallicFactor = 0 }, {}, {}, {} },
     groundType = ground or 'ROCK', materialTag0 = 'beamcraft', castShadows = true,
   }
+  if matte then def.dynamicCubemap, def.useAnisotropic = false, false end
   -- v1.5 materials take alpha from opacityMap, not from the colour map's alpha
   if kind == 'cutout' then
-    def.Stages[1].opacityMap = texture
+    def.Stages[1].opacityMap = opacityTexture or texture
     def.alphaTest, def.alphaRef, def.doubleSided = true, 110, true
   elseif kind == 'translucent' then
-    def.Stages[1].opacityMap = texture
+    def.Stages[1].opacityMap = opacityTexture or texture
     def.translucent, def.translucentBlendOp, def.translucentZWrite, def.doubleSided = true, 'LerpAlpha', false, true
   end
   return M.material(name, def)

@@ -1,14 +1,13 @@
--- Relay for Minecraft's GUI frames: BeamNG's Chromium UI can't open network
--- connections itself, so Lua reads the frame patches from the hidden Minecraft
+-- Relay for Minecraft's GUI frames: Lua reads the frame patches from the hidden Minecraft
 -- (raw mode of its overlay server, 127.0.0.1:47802) and hands each one to the UI page
--- (ui/modModules/beamcraft) untouched, via guihooks.triggerRawJS.
+-- (ui/modModules/beamcraft) untouched, directly into the canvas renderer.
 --
--- Pull model with end-to-end backpressure: we ask Minecraft for one frame (a byte on
+-- Pull model with a three-frame window: we ask Minecraft for a frame (a byte on
 -- the socket), it answers with one message holding every changed patch of that frame:
 -- u32 little-endian length, then '[["fullW,fullH,x,y,w,h|<base64>", ...]]' - already the
--- JS hook's argument list, queued for the page as-is. The page acks once it has painted
--- (beamcraft_main.overlayAck), and only then do we ask for the next frame. Nothing can
--- pile up anywhere, so the overlay always shows the newest frame BeamNG can keep up with.
+-- JS hook's argument list, queued for the page as-is. The page acks once it has painted.
+-- We decode ahead while a previous frame is in the UI queue, avoiding an entire
+-- round trip of idle time without allowing an unbounded backlog.
 
 local socket = require('socket.socket')
 local sbuf = require('string.buffer')
@@ -23,22 +22,55 @@ local sock
 local inbuf = sbuf.new()
 local need = nil   -- length of the patch being read, once its header has arrived
 local retry = 0
-local waiting = nil -- 'mc' while a frame is requested, 'page' while the page paints
+local mcPending = 0
+local pagePending = 0
 local waitTime = 0
+local WINDOW = 3
 M.frames = 0
+local refreshOwner, savedRefresh
+local refreshTimer = 0
+
+-- BeamNG normally limits its main browser to 30 FPS. Its supported maximum is
+-- 60 FPS (requests above 60 are clamped by the engine). Raise it while this HUD
+-- is visible, and restore the user's previous rate when leaving Minecraft.
+function M.setVisible(enabled)
+  local cef = scenetree.maincef
+  if refreshOwner and (not enabled or cef ~= refreshOwner) then
+    pcall(function() refreshOwner:setMaxFPSLimit(savedRefresh) end)
+    refreshOwner, savedRefresh = nil, nil
+  end
+  if enabled and cef then
+    if not refreshOwner then
+      local ok, rate = pcall(function() return cef:getMaxFPSLimit() end)
+      if not ok then return end
+      refreshOwner, savedRefresh = cef, math.floor(rate + 0.5)
+    end
+    cef:setMaxFPSLimit(60)
+    M.browserCap = 60
+  else
+    M.browserCap = nil
+  end
+end
 
 local function close()
   if sock then pcall(function() sock:close() end) end
   sock = nil
   inbuf:reset()
   need = nil
-  waiting = nil
+  mcPending = 0
+  pagePending = 0
 end
 M.close = close
+function M.shutdown()
+  close()
+  M.setVisible(false)
+end
 
 -- the page painted the last frame
-function M.ack()
-  if waiting == 'page' then waiting = nil end
+function M.ack(n)
+  n = math.max(1, math.min(WINDOW, tonumber(n) or 1))
+  pagePending = math.max(0, pagePending - n)
+  M.painted = (M.painted or 0) + n
 end
 
 local function connect()
@@ -54,13 +86,19 @@ local function connect()
   sock = s
   inbuf:reset()
   need = nil
-  waiting = nil
+  mcPending = 0
+  pagePending = 0
   return true
 end
 
 -- enabled: only pull frames while Steve is being played (Minecraft renders the
 -- overlay only while someone is watching)
 function M.update(dt, enabled)
+  refreshTimer = refreshTimer - dt
+  if enabled ~= (refreshOwner ~= nil) or refreshTimer <= 0 then
+    M.setVisible(enabled)
+    refreshTimer = 1
+  end
   if not enabled then
     if sock then close() end
     return
@@ -91,23 +129,29 @@ function M.update(dt, enabled)
     M.bytes = M.bytes + need
     need = nil
     M.frames = M.frames + 1
+    mcPending = math.max(0, mcPending - 1)
     if frame ~= '[[]]' then
       M.patches = M.patches + 1
-      be:queueHookJS('BeamCraftFrame', frame, 0)
-      waiting, waitTime = 'page', 0
-    else
-      waiting = nil -- nothing changed: ask again right away
+      be:executeJS('window.beamcraftOverlay && window.beamcraftOverlay.frame((' .. frame .. ')[0]);')
+      pagePending = pagePending + 1
     end
+    waitTime = 0
   end
 
-  -- recover if an ack or a frame got lost (e.g. the page reloaded)
-  if waiting then
+  -- recover if a frame or UI ack got lost (e.g. the page reloaded)
+  if mcPending > 0 or pagePending >= WINDOW then
     waitTime = waitTime + dt
-    if waitTime > 0.5 then waiting = nil end
+    if waitTime > 0.5 then
+      if mcPending > 0 then close() return end
+      pagePending = 0
+      waitTime = 0
+    end
   end
-  if sock and not waiting then
-    sock:send('N')
-    waiting, waitTime = 'mc', 0
+  while sock and mcPending + pagePending < WINDOW do
+    local sent, err = sock:send('N')
+    if not sent then close() return end
+    mcPending = mcPending + 1
+    waitTime = 0
   end
 end
 

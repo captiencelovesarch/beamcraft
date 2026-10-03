@@ -2,12 +2,15 @@ package dev.captience.beamcraft.client;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -20,7 +23,12 @@ import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.component.DyedItemColor;
+import net.minecraft.world.item.equipment.Equippable;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.util.RandomSource;
@@ -94,14 +102,145 @@ public final class GuiExport {
 		if (skinImg == null) skinImg = read(rm, skin.body().texturePath());
 		if (skinImg == null) skinImg = read(rm, Identifier.withDefaultNamespace("textures/entity/player/wide/steve.png"));
 		if (skinImg != null) {
+			JsonObject overlays = new JsonObject();
+			overlays.addProperty("head", hasAlpha(skinImg, 32, 0, 32, 16));
+			overlays.addProperty("body", hasAlpha(skinImg, 16, 32, 24, 16));
+			overlays.addProperty("armR", hasAlpha(skinImg, 40, 32, 16, 16));
+			overlays.addProperty("armL", hasAlpha(skinImg, 48, 48, 16, 16));
+			overlays.addProperty("legR", hasAlpha(skinImg, 0, 32, 16, 16));
+			overlays.addProperty("legL", hasAlpha(skinImg, 0, 48, 16, 16));
+			msg.add("overlays", overlays);
 			// BeamNG caches textures by path: name the file after its content
 			int[] argb = skinImg.getRGB(0, 0, skinImg.getWidth(), skinImg.getHeight(), null, 0, skinImg.getWidth());
 			String skinFile = "skin_" + Integer.toHexString(java.util.Arrays.hashCode(argb)) + ".png";
 			write(upscale(skinImg, 4), out.resolve(skinFile));
 			msg.addProperty("skin", skinFile);
+			String maskFile = skinFile.replace(".png", "_opacity.data.png");
+			write(upscale(opacityMask(skinImg), 4), out.resolve(maskFile));
+			msg.addProperty("skinMask", maskFile);
+		}
+		BufferedImage capeImg = null;
+		Path customCape = mc.gameDirectory.toPath().resolve("beamcraft").resolve("cape.png");
+		if (Files.isRegularFile(customCape)) {
+			try {
+				capeImg = ImageIO.read(customCape.toFile());
+			} catch (IOException e) {
+				LOG.warn("Unreadable cape {}", customCape, e);
+			}
+		}
+		if (capeImg == null) capeImg = read(rm, Identifier.fromNamespaceAndPath("beamcraft", "textures/entity/captience_cape.png"));
+		if (capeImg != null && capeImg.getWidth() >= 22 && capeImg.getHeight() >= 17) {
+			int[] argb = capeImg.getRGB(0, 0, capeImg.getWidth(), capeImg.getHeight(), null, 0, capeImg.getWidth());
+			String capeFile = "cape_" + Integer.toHexString(java.util.Arrays.hashCode(argb)) + ".png";
+			write(upscale(capeImg, 4), out.resolve(capeFile));
+			msg.addProperty("cape", capeFile);
 		}
 		msg.addProperty("slim", skin.model().name().equalsIgnoreCase("slim"));
 		return msg;
+	}
+
+	private static boolean hasAlpha(BufferedImage image, int x, int y, int w, int h) {
+		for (int py = y; py < Math.min(y + h, image.getHeight()); py++) {
+			for (int px = x; px < Math.min(x + w, image.getWidth()); px++) {
+				if ((image.getRGB(px, py) >>> 24) != 0) return true;
+			}
+		}
+		return false;
+	}
+
+	private static BufferedImage opacityMask(BufferedImage image) {
+		BufferedImage mask = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
+		for (int y = 0; y < image.getHeight(); y++) {
+			for (int x = 0; x < image.getWidth(); x++) {
+				int a = image.getRGB(x, y) >>> 24;
+				mask.setRGB(x, y, (a << 16) | (a << 8) | a);
+			}
+		}
+		return mask;
+	}
+
+	/** Export the equipped armor's Minecraft texture (including leather dye layers). */
+	public static JsonObject ensureArmor(Minecraft mc, Path dir, ItemStack stack, EquipmentSlot slot) {
+		Equippable equip = stack.get(DataComponents.EQUIPPABLE);
+		if (equip == null || equip.slot() != slot || equip.assetId().isEmpty()) return null;
+		Identifier asset = equip.assetId().get().identifier();
+		String layerType = slot == EquipmentSlot.LEGS ? "humanoid_leggings" : "humanoid";
+		DyedItemColor dye = stack.get(DataComponents.DYED_COLOR);
+		String color = dye == null ? "default" : Integer.toHexString(dye.rgb() & 0xFFFFFF);
+		String base = (asset.getNamespace() + "_" + asset.getPath() + "_" + layerType + "_" + color)
+			.replaceAll("[^A-Za-z0-9_-]", "_");
+		Path file = dir.resolve(base + ".png");
+		Path mask = dir.resolve(base + "_opacity.data.png");
+		try {
+			if (!Files.isRegularFile(file) || !Files.isRegularFile(mask)) {
+				BufferedImage image = composeArmor(mc.getResourceManager(), asset, layerType, dye);
+				if (image == null) return null;
+				Files.createDirectories(dir);
+				write(upscale(image, 4), file);
+				write(upscale(opacityMask(image), 4), mask);
+			}
+			JsonObject result = new JsonObject();
+			result.addProperty("texture", "/beamcraft/armor/" + file.getFileName());
+			result.addProperty("mask", "/beamcraft/armor/" + mask.getFileName());
+			return result;
+		} catch (Exception e) {
+			LOG.warn("Could not export armor {} for {}", asset, slot, e);
+			return null;
+		}
+	}
+
+	private static BufferedImage composeArmor(ResourceManager rm, Identifier asset, String type, DyedItemColor dye) throws IOException {
+		Identifier definition = Identifier.fromNamespaceAndPath(asset.getNamespace(), "equipment/" + asset.getPath() + ".json");
+		Optional<Resource> resource = rm.getResource(definition);
+		if (resource.isEmpty()) return null;
+		JsonArray layers;
+		try (InputStreamReader reader = new InputStreamReader(resource.get().open(), StandardCharsets.UTF_8)) {
+			JsonObject obj = JsonParser.parseReader(reader).getAsJsonObject();
+			JsonObject all = obj.getAsJsonObject("layers");
+			if (all == null || !all.has(type)) return null;
+			layers = all.getAsJsonArray(type);
+		}
+		BufferedImage result = null;
+		for (var element : layers) {
+			JsonObject layer = element.getAsJsonObject();
+			if (layer.has("use_player_texture") && layer.get("use_player_texture").getAsBoolean()) continue;
+			if (layer.has("dyeable") && dye == null) {
+				JsonObject d = layer.getAsJsonObject("dyeable");
+				if (d.has("only_if_dyed") && d.get("only_if_dyed").getAsBoolean()) continue;
+			}
+			Identifier id = Identifier.parse(layer.get("texture").getAsString());
+			Identifier path = Identifier.fromNamespaceAndPath(id.getNamespace(),
+				"textures/entity/equipment/" + type + "/" + id.getPath() + ".png");
+			BufferedImage image = read(rm, path);
+			if (image == null) continue;
+			if (result == null) result = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_ARGB);
+			int tint = -1;
+			if (layer.has("dyeable")) {
+				JsonObject d = layer.getAsJsonObject("dyeable");
+				tint = dye == null ? (d.has("color_when_undyed") ? d.get("color_when_undyed").getAsInt() : -1) : dye.rgb();
+			}
+			for (int y = 0; y < Math.min(result.getHeight(), image.getHeight()); y++) {
+				for (int x = 0; x < Math.min(result.getWidth(), image.getWidth()); x++) {
+					int src = image.getRGB(x, y), a = src >>> 24;
+					if (a == 0) continue;
+					int r = (src >> 16) & 255, g = (src >> 8) & 255, b = src & 255;
+					if (tint != -1) {
+						r = r * ((tint >> 16) & 255) / 255;
+						g = g * ((tint >> 8) & 255) / 255;
+						b = b * (tint & 255) / 255;
+					}
+					int dst = result.getRGB(x, y), da = dst >>> 24;
+					int oa = a + da * (255 - a) / 255;
+					if (oa == 0) continue;
+					int sr = r * a, sg = g * a, sb = b * a;
+					int dr = ((dst >> 16) & 255) * da * (255 - a) / 255;
+					int dg = ((dst >> 8) & 255) * da * (255 - a) / 255;
+					int db = (dst & 255) * da * (255 - a) / 255;
+					result.setRGB(x, y, (oa << 24) | ((sr + dr) / oa << 16) | ((sg + dg) / oa << 8) | ((sb + db) / oa));
+				}
+			}
+		}
+		return result;
 	}
 
 	/** Advance width (in font pixels) of each of the 256 glyphs of ascii.png. */

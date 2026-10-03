@@ -2,8 +2,8 @@
 //
 // The hidden Minecraft renders its HUD, first-person hand, screen effects and every
 // screen (inventory, crafting, chests, chat, death screen) over a transparent
-// background. BeamNG's Lua relays the changed part of each frame here (this page
-// can't open network connections itself) as "fullW,fullH,x,y,w,h|<base64 RGBA>";
+// background. BeamNG's Lua relays the changed part of each frame here
+// as "fullW,fullH,x,y,w,h|<base64 RGBA>";
 // we paint it on a full-screen canvas. While a Minecraft screen is open, mouse and
 // keyboard go back the same way (page -> Lua -> Minecraft) as GLFW events.
 
@@ -44,35 +44,91 @@ class BeamCraftOverlay {
     this.canvas = document.createElement('canvas')
     this.canvas.id = 'beamcraft-overlay'
     Object.assign(this.canvas.style, {
-      position: 'fixed', left: '0', top: '0', width: '100vw', height: '100vh',
+      position: 'fixed', left: '0', top: '0', width: '100%', height: '100%',
       zIndex: '2147483646', pointerEvents: 'none', imageRendering: 'pixelated', display: 'none',
+      willChange: 'transform', transform: 'translateZ(0)', contain: 'strict',
     })
-    this.ctx = this.canvas.getContext('2d')
+    this.ctx = this.canvas.getContext('2d', { alpha: true, desynchronized: true })
+    this.ctx.imageSmoothingEnabled = false
+    this.frames = []
+    this.presented = 0
+    this.decodeMs = 0
+    this.maxQueue = 0
+    this.rafCount = 0
+    this.measureStart = performance.now()
+    const present = (now) => {
+      this.rafCount++
+      let acknowledgements = 0
+      while (this.frames.length && this.frames[0].ready) {
+        const frame = this.frames.shift()
+        if (frame.error) toLua({ t: 'full' })
+        else for (const apply of frame.patches) apply()
+        acknowledgements++
+        this.presented++
+      }
+      if (acknowledgements && window.bngApi?.engineLua) window.bngApi.engineLua('beamcraft_main.overlayAck(' + acknowledgements + ')')
+      if (now - this.measureStart > 2000) {
+        const fps = this.rafCount * 1000 / (now - this.measureStart)
+        if (window.bngApi?.engineLua) window.bngApi.engineLua('beamcraft_main.overlayMetrics(' + fps.toFixed(1) + ',' + this.decodeMs.toFixed(1) + ',' + this.maxQueue + ')')
+        this.rafCount = 0; this.measureStart = now; this.maxQueue = this.frames.length
+      }
+      requestAnimationFrame(present)
+    }
+    requestAnimationFrame(present)
     const attach = () => document.body ? document.body.appendChild(this.canvas) : setTimeout(attach, 200)
     attach()
     this.bindInput()
   }
 
-  onPatch(str) {
-    if (typeof str !== 'string') return
-    const bar = str.indexOf('|')
-    if (bar < 0) return
-    const [fullW, fullH, x, y, w, h] = str.substring(0, bar).split(',').map(Number)
-    if (this.canvas.width !== fullW || this.canvas.height !== fullH) {
-      this.canvas.width = fullW
-      this.canvas.height = fullH
-      if (x !== 0 || y !== 0 || w !== fullW || h !== fullH) {
-        toLua({ t: 'full' }) // resized under a partial update: ask for a whole frame
-        return
+  resize(w, h) {
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w; this.canvas.height = h
+      this.ctx.imageSmoothingEnabled = false
+    }
+  }
+
+  async decodePatch(str) {
+    if (typeof str !== 'string') return () => {}
+    if (str.startsWith('C|')) {
+      const [w, h] = str.substring(2).split(',').map(Number)
+      return () => { this.resize(w, h); this.ctx.clearRect(0, 0, w, h) }
+    }
+    const png = str.startsWith('P|'), raw = str.startsWith('R|')
+    const start = png || raw ? 2 : 0, bar = str.indexOf('|', start)
+    const [fw, fh, x, y, w, h] = str.substring(start, bar).split(',').map(Number)
+    if (![fw, fh, x, y, w, h].every(Number.isFinite) || !w || !h) return () => {}
+    const binary = atob(str.substring(bar + 1))
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    if (png) {
+      const blob = new Blob([bytes], { type: 'image/png' })
+      let image
+      if (typeof createImageBitmap === 'function') image = await createImageBitmap(blob, { premultiplyAlpha: 'premultiply' })
+      else image = await new Promise((resolve, reject) => {
+        const img = new Image(), url = URL.createObjectURL(blob)
+        img.onload = () => { URL.revokeObjectURL(url); resolve(img) }
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('PNG decode failed')) }
+        img.src = url
+      })
+      return () => {
+        this.resize(fw, fh)
+        this.ctx.clearRect(x, y, w, h); this.ctx.drawImage(image, x, y)
+        if (image.close) image.close()
+        this.patches++
       }
     }
-    if (!w || !h) return
-    const bin = atob(str.substring(bar + 1))
-    const n = bin.length
-    const bytes = new Uint8ClampedArray(n)
-    for (let i = 0; i < n; i++) bytes[i] = bin.charCodeAt(i)
-    this.ctx.putImageData(new ImageData(bytes, w, h), x, y)
-    this.patches++
+    const pixels = new ImageData(new Uint8ClampedArray(bytes.buffer), w, h)
+    return () => { this.resize(fw, fh); this.ctx.putImageData(pixels, x, y); this.patches++ }
+  }
+
+  frame(patches) {
+    const frame = { ready: false, patches: [] }, started = performance.now()
+    this.frames.push(frame)
+    this.maxQueue = Math.max(this.maxQueue, this.frames.length)
+    Promise.all((Array.isArray(patches) ? patches : [patches]).map(p => this.decodePatch(p)))
+      .then(result => { frame.patches = result })
+      .catch(error => { console.error('[BeamCraft] overlay decode failed', error); frame.error = true })
+      .finally(() => { this.decodeMs = performance.now() - started; frame.ready = true })
   }
 
   setState(state) {
@@ -139,12 +195,7 @@ const overlay = new BeamCraftOverlay()
 window.beamcraftOverlay = overlay
 
 window.angular.module('beamcraft', []).run(['$rootScope', function ($rootScope) {
-  // one frame's patches relayed by Lua; ack so Lua asks Minecraft for the next one
-  $rootScope.$on('BeamCraftFrame', (ev, patches) => {
-    if (Array.isArray(patches)) for (const p of patches) overlay.onPatch(p)
-    else overlay.onPatch(patches)
-    if (window.bngApi && window.bngApi.engineLua) window.bngApi.engineLua('beamcraft_main.overlayAck()')
-  })
+  $rootScope.$on('BeamCraftFrame', (ev, patches) => overlay.frame(patches))
   // visibility/interactivity: guihooks.trigger('BeamCraftOverlay', {visible=, interactive=})
   $rootScope.$on('BeamCraftOverlay', (ev, data) => overlay.setState(data))
 }])

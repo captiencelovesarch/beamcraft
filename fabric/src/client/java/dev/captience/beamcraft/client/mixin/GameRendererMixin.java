@@ -50,6 +50,11 @@ public abstract class GameRendererMixin {
 		return BeamCraftClient.HEADLESS ? beamcraft$TRANSPARENT : color;
 	}
 
+	@Inject(method = "render", at = @At("HEAD"))
+	private void beamcraft$inputAtRenderRate(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
+		BeamCraftClient.beforeRender(net.minecraft.client.Minecraft.getInstance());
+	}
+
 	@Inject(method = "render", at = @At("TAIL"))
 	private void beamcraft$capture(DeltaTracker deltaTracker, boolean advanceGameTime, CallbackInfo ci) {
 		OverlayCapture.afterFrame(((GameRenderer) (Object) this).mainRenderTarget());

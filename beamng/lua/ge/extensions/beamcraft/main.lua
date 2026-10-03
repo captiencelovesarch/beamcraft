@@ -19,6 +19,8 @@ local hud = require('beamcraft/hud')
 local player = require('beamcraft/player')
 local entities = require('beamcraft/entities')
 local vehicles = require('beamcraft/vehicles')
+local items = require('beamcraft/items')
+local particles = require('beamcraft/particles')
 local mu = require('beamcraft/meshutil')
 local devconsole = require('beamcraft/devconsole')
 local overlay = require('beamcraft/overlay')
@@ -40,7 +42,7 @@ local viewport = { w = 0, h = 0 }
 local viewportTimer = 0
 local frames, frameTime = 0, 0
 
-local ctx = { world = world, iconPath = hud.iconPath }
+local ctx = { world = world, iconPath = hud.iconPath, items = items }
 
 local input = {
   f = 0, b = 0, l = 0, r = 0,
@@ -76,7 +78,11 @@ local function toast(msg)
 end
 
 -- the overlay page painted a frame: Minecraft may send the next one
-function M.overlayAck() overlay.ack() end
+function M.overlayAck(n) overlay.ack(n) end
+function M.overlayMetrics(fps, decodeMs, maxQueue)
+  overlay.uiFps, overlay.decodeMs, overlay.maxQueue = fps, decodeMs, maxQueue
+end
+M.overlay = overlay
 
 -- mouse/keyboard from the overlay page while a Minecraft screen is open, on to Minecraft
 function M.overlayInput(json)
@@ -145,18 +151,6 @@ local function lookRay()
   return vec3(eye), vec3(dx, dy, dz)
 end
 
--- left click: punch a car if one is closer than the block Minecraft is aiming at
-local function tryPunch()
-  local eye, dir = lookRay()
-  if not eye then return end
-  local reach = 4.5
-  if target then
-    local bx, by, bz = coords.mcToBng(target[1] + 0.5, target[2] + 0.5, target[3] + 0.5)
-    reach = math.min(reach, (vec3(bx, by, bz) - eye):length())
-  end
-  vehicles.punch(eye, dir, reach)
-end
-
 function M.key(name, value)
   if not active then return end
   local v = (value or 0) > 0.5 and 1 or 0
@@ -167,7 +161,6 @@ function M.key(name, value)
       inputDirty = true
       -- attack/use also need a click event, Minecraft counts presses separately
       if (name == 'attack' or name == 'use') and v == 1 then events[#events + 1] = { k = name } end
-      if name == 'attack' and v == 1 then tryPunch() end
     end
   elseif v == 1 then
     events[#events + 1] = { k = name }
@@ -202,6 +195,34 @@ local function lerpAngle(a, b, t)
   return a + d * t
 end
 
+local function partRotation(part)
+  return mu.qmul(mu.qaxis(0, 0, 1, part[6]),
+    mu.qmul(mu.qaxis(0, 1, 0, part[5]), mu.qaxis(1, 0, 0, part[4])))
+end
+
+local function lerpPose(poseA, poseB, t)
+  if not poseB then return nil end
+  if not poseA then return poseB end
+  local result = {}
+  for name, part in pairs(poseB) do
+    local old = poseA[name] or part
+    local values = {}
+    for i = 1, 3 do values[i] = old[i] + (part[i] - old[i]) * t end
+    -- ModelPart Euler angles can flip at the cape's half turn. Interpolate the
+    -- equivalent quaternion along its shortest arc instead.
+    local qa, qb = partRotation(old), partRotation(part)
+    local dot = qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3] + qa[4] * qb[4]
+    if dot < 0 then for i = 1, 4 do qb[i] = -qb[i] end end
+    local q = {}
+    local norm = 0
+    for i = 1, 4 do q[i] = qa[i] + (qb[i] - qa[i]) * t norm = norm + q[i] * q[i] end
+    norm = math.sqrt(norm)
+    for i = 1, 4 do values[i + 6] = q[i] / norm end
+    result[name] = values
+  end
+  return result
+end
+
 -- interpolated Minecraft pose (MC coords / degrees), or nil
 local function poseNow()
   if not curSnap then return nil end
@@ -213,7 +234,9 @@ local function poseNow()
     eye = p.eye + (c.eye - p.eye) * a,
     by = lerpAngle(p.by or 0, c.by or 0, a), hy = lerpAngle(p.hy or 0, c.hy or 0, a),
     pitch = c.pitch, lp = (p.lp or 0) + ((c.lp or 0) - (p.lp or 0)) * a, ls = c.ls,
-    sw = c.sw, cr = c.cr, held = c.held, hs = c.hs,
+    fps = c.fps, fpsCap = c.fpsCap, configuredCap = c.configuredCap,
+    sw = c.sw, cr = c.cr, held = c.held, hs = c.hs, ir = c.ir, il = c.il,
+    m = lerpPose(p.m, c.m, a),
   }
 end
 M.poseNow = poseNow
@@ -289,6 +312,7 @@ function M.enter()
   -- fires our own "camera lost focus" exit, which must not undo this enter
   core_camera.setByName(0, 'beamcraft', false)
   active = true
+  overlay.setVisible(true)
   entering = false
   if lockMouse then lockMouse(true) end
   pushActionMapHighestPriority('BeamCraft')
@@ -301,6 +325,7 @@ end
 function M.exit()
   if not active then return end
   active = false
+  overlay.setVisible(false)
   setScreenOpen(false)
   if setCEFTyping then setCEFTyping(false) end
   net.send({ t = 'exit' })
@@ -344,21 +369,30 @@ handlers.unready = function(m)
   ready = false
   if active then M.exit() end
   entities.clear()
+  particles.clear()
 end
 
 handlers.atlas = function(m) world.setAtlas(m) end
 handlers.states = function(m) world.defineStates(m) end
 handlers.blocks = function(m) world.setBlocks(m) end
-handlers.clear = function(m) world.clear() terrain.reset() entities.clear() end
+handlers.clear = function(m) world.clear() terrain.reset() entities.clear() particles.clear() end
 handlers.gui = function(m)
   hud.gui = m
-  player.setSkin(m.dir, m.slim, m.skin)
+  player.setSkin(m.dir, m.slim, m.skin, m.overlays, m.skinMask, m.cape)
 end
 handlers.icons = function(m) hud.iconsDir = m.dir end
 handlers.ents = function(m) entities.snapshot(m, now, ctx) end
+handlers.itemModel = function(m) items.define(m) end
+handlers.particles = function(m) particles.snapshot(m, now) end
+handlers.vehHit = function(m) vehicles.hit(m, now) end
+handlers.vehUse = function(m)
+  local veh = scenetree.findObjectById(m.id)
+  if active and veh and veh:getJBeamFilename() ~= 'unicycle' then M.exit() be:enterVehicle(0, veh) end
+end
 handlers.boom = function(m) vehicles.explode(m.x, m.y, m.z, m.r or 4, now) end
 
 handlers.p = function(m)
+  if m.armorModel then player.setArmor(m.armorModel) end
   prevSnap = curSnap
   m.at = now
   m.eye = m.eye or 1.62
@@ -398,29 +432,13 @@ end
 
 world.onBlockChanged = function(x, y, z) terrain.invalidateBlock(x, y, z) end
 
--- Collision rebuilds hitch the game, so only do them when a car needs them: while you
--- drive, or when a moving car is heading for blocks that changed. Never just because
--- Steve placed a block (Minecraft handles his collision).
-world.shouldRebuildCollision = function(centres)
-  if not active then return true end
-  local need = false
-  for _, veh in ipairs(getAllVehicles()) do
-    local v = veh:getVelocity()
-    local speed = v:length()
-    if speed > 1.5 and veh:getJBeamFilename() ~= 'unicycle' then
-      local p = veh:getPosition()
-      local reach = 15 + speed * 2.5
-      for _, c in ipairs(centres) do
-        if (c - p):length() < reach then need = true break end
-      end
-    end
-    if need then break end
-  end
-  return need
-end
+-- Never leave edited geometry solid indefinitely. World coalesces changes with a
+-- bounded delay, and entering a car drains all queued meshes before rebuilding.
+terrain.withoutBlocks = world.withoutCollision
 world.onCollisionReloaded = function() terrain.invalidateAll() end
 
 local inputTimer = 0
+local obstacleTimer = 0
 
 local function drawTarget()
   if not target then return end
@@ -459,10 +477,13 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     ready = false
     if active then M.exit() end
     entities.clear()
+    particles.clear()
   end)
   for i = 1, #msgs do handle(msgs[i]) end
 
   world.update(dtReal)
+  obstacleTimer = obstacleTimer + dtReal
+  if obstacleTimer >= 0.1 then obstacleTimer = 0 vehicles.updateObstacles(world) end
   overlay.update(dtReal, active and net.isConnected())
 
   frames, frameTime = frames + 1, frameTime + dtReal
@@ -491,7 +512,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   player.visibleFirst = false
   player.updateThird(pose, ctx)
   entities.update(now)
-  vehicles.drawFlashes(now)
+  particles.update(now)
 
   if active and net.isConnected() and pose then
     local fx, fy, fz = pose.x, pose.y, pose.z
@@ -504,7 +525,8 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     vehTimer = vehTimer + dtReal
     if vehTimer > 0.1 then
       vehTimer = 0
-      net.send({ t = 'veh', b = vehicles.collisionBoxes(feetB) })
+      local boxes, targets = vehicles.collisionBoxes(feetB)
+      net.send({ t = 'veh', b = boxes, targets = targets })
     end
     local hurt = vehicles.checkHits(now, feetB)
     if hurt then net.send(hurt) end
@@ -554,9 +576,10 @@ local function onExtensionUnloaded()
   if active then M.exit() end
   world.clear()
   entities.clear()
+  particles.clear()
   player.destroy()
   net.close('extension unloaded')
-  overlay.close()
+  overlay.shutdown()
   devconsole.close()
 end
 
@@ -565,8 +588,9 @@ local function onClientStartMission()
   world.clear()
   terrain.reset()
   entities.clear()
+  particles.clear()
   player.destroy()
-  if hud.gui then player.setSkin(hud.gui.dir, hud.gui.slim, hud.gui.skin) end
+  if hud.gui then player.setSkin(hud.gui.dir, hud.gui.slim, hud.gui.skin, hud.gui.overlays, hud.gui.skinMask, hud.gui.cape) end
   ready = false
   curSnap, prevSnap = nil, nil
   if net.isConnected() then sendHello() end
@@ -576,6 +600,7 @@ local function onClientEndMission()
   if active then M.exit() end
   world.clear()
   entities.clear()
+  particles.clear()
   player.destroy()
   ready = false
   curSnap, prevSnap = nil, nil

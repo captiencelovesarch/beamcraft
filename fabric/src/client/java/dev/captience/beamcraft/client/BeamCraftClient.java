@@ -20,12 +20,19 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.model.geom.ModelLayers;
+import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.client.model.player.PlayerModel;
+import net.minecraft.client.model.player.PlayerCapeModel;
+import net.minecraft.client.renderer.entity.player.AvatarRenderer;
+import net.minecraft.client.renderer.entity.state.AvatarRenderState;
 import net.minecraft.client.Options;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
@@ -64,7 +71,11 @@ public class BeamCraftClient implements ClientModInitializer {
 		ResourceKey.create(Registries.WORLD_PRESET, Identifier.fromNamespaceAndPath("beamcraft", "beamng"));
 
 	private static volatile boolean controlling;
+	private static BeamCraftClient instance;
 	private static volatile int targetFps = 144;
+	private PlayerModel widePoseModel;
+	private PlayerModel slimPoseModel;
+	private PlayerCapeModel capePoseModel;
 
 	/** Frame rate the hidden client renders (and streams its overlay) at: BeamNG's own. */
 	public static int targetFps() {
@@ -106,7 +117,11 @@ public class BeamCraftClient implements ClientModInitializer {
 
 	@Override
 	public void onInitializeClient() {
+		instance = this;
 		LOG.info("BeamCraft client starting (headless={})", HEADLESS);
+		net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry.register(dev.captience.beamcraft.VehicleTargets.TYPE, ctx -> new net.minecraft.client.renderer.entity.EntityRenderer<dev.captience.beamcraft.VehicleTargets.Target, net.minecraft.client.renderer.entity.state.EntityRenderState>(ctx) {
+			public net.minecraft.client.renderer.entity.state.EntityRenderState createRenderState() { return new net.minecraft.client.renderer.entity.state.EntityRenderState(); }
+		});
 		Bridge.start();
 		OverlayServer.start();
 		ClientLifecycleEvents.CLIENT_STARTED.register(this::configure);
@@ -140,7 +155,7 @@ public class BeamCraftClient implements ClientModInitializer {
 	// incoming
 	// ----------------------------------------------------------------------------
 
-	private void startTick(Minecraft mc) {
+	private void receive(Minecraft mc) {
 		JsonObject msg;
 		while ((msg = Bridge.poll()) != null) {
 			try {
@@ -149,6 +164,23 @@ public class BeamCraftClient implements ClientModInitializer {
 				LOG.warn("Message {} failed", msg.has("t") ? msg.get("t").getAsString() : "?", e);
 			}
 		}
+	}
+
+	/** Drain look/click input at render speed; waiting for 20 Hz ticks makes the
+	 * native hand camera visibly step even when both games render at high FPS. */
+	public static void beforeRender(Minecraft mc) {
+		if (!HEADLESS || instance == null) return;
+		instance.receive(mc);
+		instance.applyOverlayInput(mc);
+		if (controlling && mc.player != null && instance.haveLook) {
+			mc.player.setYRot(instance.inYaw);
+			mc.player.setXRot(Math.max(-90f, Math.min(90f, instance.inPitch)));
+			mc.player.yRotO = mc.player.getYRot(); mc.player.xRotO = mc.player.getXRot();
+		}
+	}
+
+	private void startTick(Minecraft mc) {
+		receive(mc);
 		// Vanilla holds the player frozen until the chunk under them has been compiled
 		// for rendering. Headless never renders, so declare it compiled ourselves.
 		if (HEADLESS && mc.getConnection() != null) {
@@ -191,25 +223,26 @@ public class BeamCraftClient implements ClientModInitializer {
 	}
 
 	/**
-	 * Size the hidden window to BeamNG's viewport (halved: Minecraft's GUI is pixel art,
-	 * so rendering at half size and upscaling 2x looks the same and costs a quarter).
+	 * Size the hidden window to BeamNG's actual viewport. The hand and screen effects
+	 * contain subpixel detail, so scaling a half-size framebuffer looks rough.
 	 */
 	private void applyViewport(Minecraft mc, int w, int h) {
 		if (w <= 0 || h <= 0 || !HEADLESS) return;
-		int k = 2;
-		int ww = Math.max(320, w / k), wh = Math.max(240, h / k);
-		int effective = Math.max(2, Math.round(h / 360f));
-		int scale = Math.max(1, Math.round(effective / (float) k));
-		mc.options.guiScale().set(scale);
+		int ww = Math.max(320, w), wh = Math.max(240, h);
+		// Auto is valid even before GLFW processes the resize. A fixed larger scale
+		// can be rejected against the old small window and silently reset to 2.
+		// Vanilla auto scaling also keeps menus and the HUD readable at 1440p/4K.
+		mc.options.guiScale().set(0);
 		mc.getWindow().setWindowed(ww, wh);
 		mc.resizeGui();
-		LOG.info("Overlay {}x{} (BeamNG {}x{}), GUI scale {}", ww, wh, w, h, scale);
+		LOG.info("Overlay {}x{} (BeamNG {}x{}), GUI scale auto", ww, wh, w, h);
 	}
 
 	private void handle(Minecraft mc, JsonObject m) {
 		String t = m.get("t").getAsString();
 		switch (t) {
 			case "_connect" -> {
+				ItemExport.reset();
 				sentStates.clear();
 				lastHud = "";
 				atlasSent = false;
@@ -249,7 +282,9 @@ public class BeamCraftClient implements ClientModInitializer {
 			}
 			case "give" -> giveToSelected(mc, m.get("id").getAsString());
 			case "viewport" -> applyViewport(mc, m.get("vw").getAsInt(), m.get("vh").getAsInt());
-			case "fps" -> targetFps = Math.max(30, Math.min(360, (int) Math.round(num(m, "fps") * 1.1)));
+			// Render ahead of BeamNG so a pull normally finds the next Minecraft
+			// frame within one game tick rather than waiting for two unsynced 60 Hz clocks.
+			case "fps" -> targetFps = Math.max(120, Math.min(240, (int) Math.round(num(m, "fps") * 1.5)));
 			case "time" -> setTimeOfDay(mc, num(m, "tod"));
 			case "oin" -> OverlayServer.INPUT.add(m.getAsJsonObject("e")); // overlay input relayed by BeamNG's Lua
 			case "hurt" -> onHurt(mc, m);
@@ -261,6 +296,7 @@ public class BeamCraftClient implements ClientModInitializer {
 						a.get(3).getAsDouble(), a.get(4).getAsDouble(), a.get(5).getAsDouble()));
 				}
 				TerrainColumns.setVehicleBoxes(boxes);
+				dev.captience.beamcraft.VehicleTargets.receive(m.has("targets") ? m.getAsJsonArray("targets") : null);
 			}
 			default -> LOG.debug("Unknown message {}", t);
 		}
@@ -460,6 +496,7 @@ public class BeamCraftClient implements ClientModInitializer {
 			sendPose(mc, p);
 			sendHud(mc, p);
 			sendEntities(mc, p);
+			ParticleExport.send(mc, userPath == null ? null : userPath.resolve("beamcraft/render"));
 		}
 		flushBlocks();
 	}
@@ -481,7 +518,18 @@ public class BeamCraftClient implements ClientModInitializer {
 			.append(",\"cr\":").append(p.isCrouching() ? 1 : 0)
 			.append(",\"scr\":").append(mc.gui.screen() != null ? 1 : 0)
 			.append(",\"cam\":").append(mc.options.getCameraType().ordinal())
-			.append(",\"fps\":").append(mc.getFps());
+			.append(",\"fps\":").append(mc.getFps())
+			.append(",\"fpsCap\":").append(targetFps())
+			.append(",\"configuredCap\":").append(mc.options.framerateLimit().get())
+			.append(",\"fall\":").append(r4(p.fallDistance));
+		appendVanillaPose(mc, p, sb);
+		appendArmor(mc, p, sb);
+		Path renderRoot = userPath == null ? null : userPath.resolve("beamcraft/render");
+		boolean leftMain = p.getMainArm() == net.minecraft.world.entity.HumanoidArm.LEFT;
+		String ir = ItemExport.model(mc, renderRoot, leftMain ? p.getOffhandItem() : p.getMainHandItem(), p, net.minecraft.world.item.ItemDisplayContext.THIRD_PERSON_RIGHT_HAND);
+		String il = ItemExport.model(mc, renderRoot, leftMain ? p.getMainHandItem() : p.getOffhandItem(), p, net.minecraft.world.item.ItemDisplayContext.THIRD_PERSON_LEFT_HAND);
+		if (ir != null) sb.append(",\"ir\":\"").append(ir).append('"');
+		if (il != null) sb.append(",\"il\":\"").append(il).append('"');
 		ItemStack held = p.getMainHandItem();
 		if (!held.isEmpty()) {
 			String hid = BuiltInRegistries.ITEM.getKey(held.getItem()).toString();
@@ -499,6 +547,59 @@ public class BeamCraftClient implements ClientModInitializer {
 		}
 		sb.append('}');
 		Bridge.sendLine(sb.toString());
+	}
+
+	@SuppressWarnings({"rawtypes", "unchecked"})
+	private void appendVanillaPose(Minecraft mc, LocalPlayer p, StringBuilder sb) {
+		try {
+			boolean slim = CustomSkin.get() != null && CustomSkin.get().model().name().equalsIgnoreCase("slim");
+			PlayerModel model;
+			if (slim) {
+				if (slimPoseModel == null) slimPoseModel = new PlayerModel(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER_SLIM), true);
+				model = slimPoseModel;
+			} else {
+				if (widePoseModel == null) widePoseModel = new PlayerModel(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER), false);
+				model = widePoseModel;
+			}
+			AvatarRenderer renderer = (AvatarRenderer) mc.getEntityRenderDispatcher().getRenderer(p);
+			AvatarRenderState state = (AvatarRenderState) renderer.createRenderState(p, 1f);
+			model.setupAnim(state);
+			if (capePoseModel == null) capePoseModel = new PlayerCapeModel(mc.getEntityModels().bakeLayer(ModelLayers.PLAYER_CAPE));
+			capePoseModel.setupAnim(state);
+			sb.append(",\"m\":{");
+			appendPart(sb, "head", model.head); sb.append(',');
+			appendPart(sb, "body", model.body); sb.append(',');
+			appendPart(sb, "armR", model.rightArm); sb.append(',');
+			appendPart(sb, "armL", model.leftArm); sb.append(',');
+			appendPart(sb, "legR", model.rightLeg); sb.append(',');
+			appendPart(sb, "legL", model.leftLeg); sb.append(',');
+			appendPart(sb, "cape", capePoseModel.body.getChild("cape"));
+			sb.append('}');
+		} catch (RuntimeException e) {
+			LOG.warn("Vanilla player pose unavailable", e);
+		}
+	}
+
+	private static void appendPart(StringBuilder sb, String name, ModelPart part) {
+		sb.append('"').append(name).append("\":[")
+			.append(r4(part.x)).append(',').append(r4(part.y)).append(',').append(r4(part.z)).append(',')
+			.append(r4(part.xRot)).append(',').append(r4(part.yRot)).append(',').append(r4(part.zRot)).append(']');
+	}
+
+	private void appendArmor(Minecraft mc, LocalPlayer p, StringBuilder sb) {
+		JsonObject armor = new JsonObject();
+		if (userPath != null) {
+			Path dir = userPath.resolve("beamcraft").resolve("armor");
+			for (EquipmentSlot slot : new EquipmentSlot[] {
+				EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET
+			}) {
+				ItemStack stack = p.getItemBySlot(slot);
+				if (stack.isEmpty()) continue;
+				JsonObject piece = GuiExport.ensureArmor(mc, dir, stack, slot);
+				if (piece != null) armor.add(slot.getName(), piece);
+			}
+		}
+		sb.append(",\"armorModel\":").append(armor);
 	}
 
 	private void sendHud(Minecraft mc, LocalPlayer p) {
@@ -631,11 +732,13 @@ public class BeamCraftClient implements ClientModInitializer {
 		StringBuilder sb = new StringBuilder("{\"t\":\"ents\",\"l\":[");
 		int n = 0;
 		for (net.minecraft.world.entity.Entity e : mc.level.getEntities(p, p.getBoundingBox().inflate(64))) {
+			if (e instanceof dev.captience.beamcraft.VehicleTargets.Target) continue;
 			String kind;
 			String extra;
 			if (e instanceof net.minecraft.world.entity.item.ItemEntity ie) {
 				kind = "i";
-				extra = '"' + BuiltInRegistries.ITEM.getKey(ie.getItem().getItem()).toString() + '"';
+				String model = ItemExport.model(mc, userPath == null ? null : userPath.resolve("beamcraft/render"), ie.getItem(), ie, net.minecraft.world.item.ItemDisplayContext.GROUND);
+				extra = model == null ? "null" : "\"" + model + "\"";
 				if (iconsDir != null) GuiExport.ensureIcon(mc, iconsDir, BuiltInRegistries.ITEM.getKey(ie.getItem().getItem()).toString());
 			} else if (e instanceof net.minecraft.world.entity.item.FallingBlockEntity fb) {
 				kind = "b";

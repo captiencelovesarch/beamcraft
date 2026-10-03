@@ -13,11 +13,9 @@ local M = {}
 -- tunables
 M.rebuildBudgetMs = 4         -- max milliseconds of meshing per frame
 M.collisionDelay = 0.15       -- coalesce collision rebuilds (seconds)
-M.minRebuildInterval = 1.5    -- never rebuild more often than this, unless forced
--- BeamNG has no per-object collision from Lua: a rebuild is the whole level (~0.1-0.3 s,
--- a visible hitch). Steve doesn't need it (Minecraft does his collision), only cars do,
--- so main.lua decides when it's worth it: shouldRebuildCollision(dirtyCentres) -> bool
-M.shouldRebuildCollision = nil
+M.minRebuildInterval = 0.35    -- never rebuild more often than this, unless forced
+-- Static collision acceleration must be rebuilt after mesh changes. Coalesce it
+-- with a bounded delay; per-object disabling prevents obsolete shapes from being hit.
 M.flipWinding = true          -- MC quads are CCW-from-outside; Torque wants CW
 M.lastCollisionMs = nil       -- measured cost of the latest reloadCollision
 M.collisionReloads = 0
@@ -118,7 +116,7 @@ end
 -- msg.d = array of { i=id, o=opaque, c=collides, g=groundType, q=flat quad array }
 function M.defineStates(msg)
   for _, d in ipairs(msg.d or {}) do
-    states[d.i] = { opaque = d.o == 1, collide = d.c == 1, ground = d.g or 'ROCK', quads = d.q or {} }
+    states[d.i] = { opaque = d.o == 1, collide = d.c == 1, ground = d.g or 'ROCK', quads = d.q or {}, boxes = d.a or {} }
   end
   -- sections waiting on these definitions can now mesh
   for key, sec in pairs(sections) do
@@ -147,6 +145,9 @@ function M.setBlocks(msg)
       if old ~= id then
         if old and not id then sec.count = sec.count - 1 totalBlocks = totalBlocks - 1 end
         if id and not old then sec.count = sec.count + 1 totalBlocks = totalBlocks + 1 end
+        -- Disable the previous collision immediately; never raycast or drive on
+        -- triangles for a state which Minecraft has already removed/changed.
+        if sec.objs[1] then sec.objs[1]:disableCollision() sec.disabled = true end
         sec.blocks[idx] = id
         markDirty(key)
         -- faces of neighbours across a section boundary may change visibility
@@ -171,13 +172,22 @@ end
 
 function M.hasPendingCollision() return collisionPending end
 
+local rebuildSection
+
 -- rebuild BeamNG's collision now if anything changed (e.g. when you get back in a car)
 function M.rebuildCollisionNow()
+  if materialsReady then
+    while #dirtyQueue > 0 do
+      local key=table.remove(dirtyQueue,1) dirtySet[key]=nil
+      if sections[key] then rebuildSection(key) end
+    end
+  end
   if not collisionPending then return end
   collisionPending = false
   collisionTimer = 0
   sinceRebuild = 0
   dirtyCentres = {}
+  for _,sec in pairs(sections) do if sec.objs[1] then sec.objs[1]:enableCollision() sec.disabled=nil end end
   local ct = hptimer()
   be:reloadCollision()
   M.lastCollisionMs = ct:stop()
@@ -216,7 +226,7 @@ local function buildSection(sec)
       local ly = floor(idx / 256)
       local wx, wy, wz = ox + lx, oy + ly, oz + lz
       local q = st.quads
-      local cflag = st.collide and 1 or 0
+      local cflag = 0 -- visual quads never supply physics geometry
       local mats = groups[cflag]
       if not mats then mats = {} groups[cflag] = mats end
       for base = 1, #q, 24 do
@@ -270,10 +280,27 @@ local function buildSection(sec)
       end
     end
   end
+  -- Collision uses Minecraft VoxelShapes, including open doors, stairs, slabs
+  -- and fences. Rendering quads can be decorative and are not collision boxes.
+  local collision = {} groups[1] = collision
+  for idx,id in pairs(sec.blocks) do
+    local st=states[id]
+    if st then
+      local lx,lz,ly=idx%16,floor(idx/16)%16,floor(idx/256)
+      for _,a in ipairs(st.boxes) do
+        local mat=mu.material('bc_collision_'..st.ground, {
+          Stages={{baseColorFactor={1,1,1,0},opacityFactor=0,roughnessFactor=1},{},{},{}},
+          translucent=true,translucentBlendOp='LerpAlpha',translucentZWrite=false,castShadows=false,groundType=st.ground,
+        })
+        local m=collision[mat] if not m then m=mu.newMesh(mat) collision[mat]=m end
+        mu.addUvBox(m,lx+a[1],-(lz+a[6]),ly+a[2],lx+a[4],-(lz+a[3]),ly+a[5],0,0,1,1,1,4,4)
+      end
+    end
+  end
   return groups, missing
 end
 
-local function rebuildSection(key)
+rebuildSection = function(key)
   local sec = sections[key]
   if not sec then return false end
   if sec.count <= 0 then
@@ -306,11 +333,12 @@ local function rebuildSection(key)
         obj:setPosition(vec3(bx, by, bz))
         obj.canSave = false
         obj:registerObject(string.format('beamcraft_s%d_%d', objCounter, cflag))
-        if cflag == 0 then pcall(function() obj:setField('collisionType', 0, 'None') end) end
         scenetree.MissionGroup:add(obj.obj)
         sec.objs[cflag] = obj
       end
-      obj:createMesh({ list })
+      obj:createMesh(cflag == 0 and { list, {} } or { list }, false)
+      if cflag == 0 then obj:enableCollision() end
+      if cflag == 1 then sec.disabled=true end
     end
   end
   collisionPending = true
@@ -319,7 +347,10 @@ local function rebuildSection(key)
 end
 
 function M.update(dt)
-  if not materialsReady then return end
+  if not materialsReady then
+    if collisionPending then M.rebuildCollisionNow() end
+    return
+  end
   local t = hptimer()
   local budget = M.rebuildBudgetMs
   while #dirtyQueue > 0 do
@@ -332,11 +363,56 @@ function M.update(dt)
   sinceRebuild = sinceRebuild + dt
   if collisionPending then
     collisionTimer = collisionTimer + dt
-    if collisionTimer >= M.collisionDelay and #dirtyQueue == 0 and sinceRebuild >= M.minRebuildInterval
-      and (not M.shouldRebuildCollision or M.shouldRebuildCollision(dirtyCentres)) then
+    if collisionTimer >= M.collisionDelay and #dirtyQueue == 0 and sinceRebuild >= M.minRebuildInterval then
       M.rebuildCollisionNow()
     end
   end
+end
+
+-- Terrain belongs to BeamNG alone; sampling MC blocks into the terrain columns
+-- duplicates their collision in Minecraft, leaving phantom floors after removal.
+function M.withoutCollision(fn)
+  local enabled={}
+  for _,sec in pairs(sections) do
+    if sec.objs[1] and not sec.disabled then sec.objs[1]:disableCollision() enabled[#enabled+1]=sec.objs[1] end
+  end
+  local ok,result=pcall(fn)
+  for _,obj in ipairs(enabled) do obj:enableCollision() end
+  if not ok then error(result) end
+  return result
+end
+
+function M.obstacleDistance(veh,reach)
+  local bb=veh:getSpawnWorldOOBB() local c=bb:getCenter() local he=bb:getHalfExtents()
+  local forward=veh:getDirectionVector() forward.z=0 forward:normalize()
+  local velocity=veh:getVelocity() velocity.z=0
+  if velocity:length()>1 and velocity:dot(forward)<0 then forward=-forward end
+  local side=vec3(-forward.y,forward.x,0)
+  local front=math.abs(bb:getAxis(0):dot(forward))*he.x+math.abs(bb:getAxis(1):dot(forward))*he.y
+  local width=math.abs(bb:getAxis(0):dot(side))*he.x+math.abs(bb:getAxis(1):dot(side))*he.y+0.2
+  local bottom=c.z-he.z local top=c.z+he.z local nearest
+  for _,sec in pairs(sections) do
+    local sx,sy,sz=coords.mcToBng(sec.sx*16+8,sec.sy*16+8,sec.sz*16+8)
+    if (vec3(sx,sy,sz)-c):length()<reach+30 then
+      for idx,id in pairs(sec.blocks) do
+        local st=states[id]
+        if st then
+          local x=sec.sx*16+idx%16 local z=sec.sy*16+floor(idx/256) local y=-(sec.sz*16+floor(idx/16)%16)
+          for _,a in ipairs(st.boxes) do
+            local low,high=z+a[2],z+a[5]
+            if high>bottom+0.3 and low<top then
+              local center=vec3(x+(a[1]+a[4])/2,y-(a[3]+a[6])/2,(low+high)/2)-c
+              local hx,hy=(a[4]-a[1])/2,(a[6]-a[3])/2
+              local lateral=math.abs(center:dot(side))-(math.abs(side.x)*hx+math.abs(side.y)*hy)
+              local longitudinal=center:dot(forward)-(math.abs(forward.x)*hx+math.abs(forward.y)*hy)-front
+              if lateral<width and longitudinal>=-0.5 and longitudinal<reach then nearest=math.min(nearest or reach,math.max(0,longitudinal)) end
+            end
+          end
+        end
+      end
+    end
+  end
+  return nearest
 end
 
 return M

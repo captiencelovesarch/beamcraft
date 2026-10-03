@@ -12,7 +12,15 @@
 		"MinecraftWindowMixin",
 		"MouseHandlerInvoker",
 		"MouseHandlerMixin",
-		"WorldOpenFlowsMixin"
+		"WorldOpenFlowsMixin",
+		"ItemStateAccessor",
+		"ItemLayerAccessor",
+		"ParticleEngineAccessor",
+		"ParticleGroupAccessor",
+		"QuadParticleAccessor",
+		"RenderTypeAccessor",
+		"RenderSetupAccessor",
+		"TextureBindingAccessor"
 	],
 	"injectors": {
 		"defaultRequire": 1

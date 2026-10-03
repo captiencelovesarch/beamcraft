@@ -55,7 +55,10 @@ public final class OverlayCapture {
 		// BeamNG's Lua pulls: capture only when it has asked for a frame
 		if (OverlayServer.hasRawViewers() && !OverlayServer.hasWebSocketViewers() && OverlayServer.RAW_REQUESTS.get() <= 0) return;
 		long now = System.nanoTime();
-		if (now - lastCapture < MIN_INTERVAL_NS || IN_FLIGHT.get() >= 3 || ENCODE_QUEUE.get() >= 3) return;
+		// BeamNG's browser supports at most 60 FPS. A direct viewer must not queue
+		// 150+ rendered frames per second behind that compositor.
+		long interval = OverlayServer.hasWebSocketViewers() ? Math.max(MIN_INTERVAL_NS, 16_666_667L) : MIN_INTERVAL_NS;
+		if (now - lastCapture < interval || IN_FLIGHT.get() >= 3 || ENCODE_QUEUE.get() >= 1) return;
 		GpuTexture tex = target.getColorTexture();
 		if (tex == null) return;
 		final int w = target.width, h = target.height;
@@ -102,48 +105,94 @@ public final class OverlayCapture {
 		// flip to top-down
 		int[] cur = new int[w * h];
 		for (int y = 0; y < h; y++) System.arraycopy(px, (h - 1 - y) * w, cur, y * w, w);
+		for (int i = 0; i < cur.length; i++) if ((cur[i] >>> 24) == 0) cur[i] = 0;
 
 		boolean full = OverlayServer.needFullFrame || prev == null || prevW != w || prevH != h;
-		rawBatch.setLength(0);
 		int[] old = prev;
 		prev = cur;
 		prevW = w;
 		prevH = h;
-		rawBatch.setLength(0);
 		if (full) {
 			OverlayServer.needFullFrame = false;
-			sendRect(cur, w, h, 0, 0, w, h);
-			flushRawBatch();
-			return;
+			if (OverlayServer.hasWebSocketViewers()) sendRect(cur, w, h, 0, 0, w, h);
+			old = new int[cur.length];
 		}
-		// Changed 32x32 tiles, merged into horizontal runs per tile row: the hand and
-		// the hotbar changing together shouldn't resend the whole screen between them.
+		// Group touching changed tiles. Separate HUD, hand and crosshair regions so
+		// their PNGs never scan the large transparent gaps between them.
 		int tilesX = (w + TILE - 1) / TILE, tilesY = (h + TILE - 1) / TILE;
+		boolean[] changed = new boolean[tilesX * tilesY];
 		for (int ty = 0; ty < tilesY; ty++) {
 			int y0 = ty * TILE, y1 = Math.min(h, y0 + TILE);
-			int runStart = -1;
-			for (int tx = 0; tx <= tilesX; tx++) {
-				boolean changed = tx < tilesX && tileChanged(cur, old, w, tx * TILE, y0, Math.min(w, tx * TILE + TILE), y1);
-				if (changed && runStart < 0) runStart = tx;
-				if (!changed && runStart >= 0) {
-					int x0 = runStart * TILE, x1 = Math.min(w, tx * TILE);
-					sendRect(cur, w, h, x0, y0, x1 - x0, y1 - y0);
-					runStart = -1;
-				}
+			for (int tx = 0; tx < tilesX; tx++) {
+				int x0 = tx * TILE, x1 = Math.min(w, x0 + TILE);
+				changed[ty * tilesX + tx] = tileChanged(cur, old, w, x0, y0, x1, y1);
 			}
 		}
-		flushRawBatch();
+		StringBuilder patches = new StringBuilder();
+		if (full && OverlayServer.hasRawViewers()) patches.append("\"C|").append(w).append(',').append(h).append('"');
+		int[] queue = new int[changed.length];
+		for (int index = 0; index < changed.length; index++) {
+			if (!changed[index]) continue;
+			int head = 0, tail = 0;
+			queue[tail++] = index;
+			changed[index] = false;
+			int left = tilesX, top = tilesY, right = 0, bottom = 0;
+			while (head < tail) {
+				int cell = queue[head++], tx = cell % tilesX, ty = cell / tilesX;
+				left = Math.min(left, tx);
+				top = Math.min(top, ty);
+				right = Math.max(right, tx + 1);
+				bottom = Math.max(bottom, ty + 1);
+				if (tx > 0) tail = visit(changed, queue, tail, cell - 1);
+				if (tx + 1 < tilesX) tail = visit(changed, queue, tail, cell + 1);
+				if (ty > 0) tail = visit(changed, queue, tail, cell - tilesX);
+				if (ty + 1 < tilesY) tail = visit(changed, queue, tail, cell + tilesX);
+			}
+			int x = left * TILE, y = top * TILE;
+			int rw = Math.min(w, right * TILE) - x, rh = Math.min(h, bottom * TILE) - y;
+			if (!full && OverlayServer.hasWebSocketViewers()) sendRect(cur, w, h, x, y, rw, rh);
+			if (OverlayServer.hasRawViewers()) addRawPng(patches, cur, w, h, x, y, rw, rh);
+		}
+		flushRawBatch(patches);
 	}
 
-	// one raw message per frame (even an empty one, which tells BeamNG it may ask again):
-	// '[["patch","patch",...]]' - the JS hook's argument list, one array argument
-	private static final StringBuilder rawBatch = new StringBuilder(1 << 20);
+	private static int visit(boolean[] changed, int[] queue, int tail, int index) {
+		if (changed[index]) {
+			changed[index] = false;
+			queue[tail++] = index;
+		}
+		return tail;
+	}
 
-	private static void flushRawBatch() {
+	// One raw message per frame. Empty frames still tell BeamNG it may ask again.
+	private static void flushRawBatch(StringBuilder patches) {
 		if (!OverlayServer.hasRawViewers()) return;
-		String msg = "[[" + rawBatch + "]]";
+		String msg = "[[" + patches + "]]";
 		byte[] raw = msg.getBytes(StandardCharsets.US_ASCII);
 		OverlayServer.broadcastRaw(raw, raw.length);
+	}
+
+	private static void addRawPng(StringBuilder patches, int[] cur, int w, int h, int x, int y, int rw, int rh) {
+		try {
+			boolean small = rw * rh <= 2048;
+			byte[] bytes;
+			if (small) {
+				bytes = new byte[rw * rh * 4]; int at = 0;
+				for (int iy=y;iy<y+rh;iy++) for (int ix=x;ix<x+rw;ix++) {
+					int c=cur[iy*w+ix], a=c>>>24;
+					for(int shift=0;shift<24;shift+=8) {int color=(c>>>shift)&255; bytes[at++]=(byte)(a>0 && a<255 ? Math.min(255,(color*255+a/2)/a) : color);}
+					bytes[at++]=(byte)a;
+				}
+			} else bytes = FastPng.encode(cur, w, x, y, rw, rh);
+			String encoded = Base64.getEncoder().encodeToString(bytes);
+			if (patches.length() > 0) patches.append(',');
+			patches.append('"').append(small ? "R|" : "P|").append(w).append(',').append(h).append(',').append(x).append(',')
+				.append(y).append(',').append(rw).append(',').append(rh).append('|')
+				.append(encoded).append('"');
+		} catch (java.io.IOException e) {
+			LOG.warn("Overlay PNG encode failed", e);
+			OverlayServer.needFullFrame = true;
+		}
 	}
 
 	private static boolean tileChanged(int[] cur, int[] old, int w, int x0, int y0, int x1, int y1) {
@@ -194,13 +243,7 @@ public final class OverlayCapture {
 				o[p++] = (byte) a;
 			}
 		}
-		if (OverlayServer.hasWebSocketViewers()) OverlayServer.broadcast(o, len);
-		if (OverlayServer.hasRawViewers()) {
-			if (rawBatch.length() > 0) rawBatch.append(',');
-			rawBatch.append('"').append(w).append(',').append(h).append(',').append(x0).append(',').append(y0).append(',')
-				.append(rw).append(',').append(rh).append('|')
-				.append(Base64.getEncoder().encodeToString(java.util.Arrays.copyOfRange(o, 20, len))).append('"');
-		}
+		OverlayServer.broadcast(o, len);
 	}
 
 	private static void putShort(byte[] o, int at, int v) {

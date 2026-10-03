@@ -15,7 +15,8 @@ M.radius = 5.0        -- sample this far around Steve
 M.above = 2.0         -- rays start this far above Steve's feet ...
 M.reach = 80.0        -- ... and look this far down
 M.resampleDelta = 0.75
-M.maxRaysPerFrame = 600
+M.maxRaysPerFrame = 192
+M.sampleBudgetMs = 2.5
 
 local NONE = -100000  -- sentinel: nothing under this column
 
@@ -46,12 +47,13 @@ function M.invalidateAll()
 end
 
 -- feetX/Y/Z in Minecraft coordinates. Returns a message table or nil.
-function M.update(feetX, feetY, feetZ)
+local function sample(feetX, feetY, feetZ)
   local r = M.res
   local rad = M.radius
   local ci, ck = floor(feetX / r), floor(feetZ / r)
   local n = math.ceil(rad / r)
   local rays = 0
+  local timer = hptimer()
   local out = outBatch
   local cnt = 0
   table.clear(out)
@@ -63,13 +65,14 @@ function M.update(feetX, feetY, feetZ)
         local key = colKey(i, k)
         local c = cache[key]
         if not c or math.abs(c.at - feetY) > M.resampleDelta then
-          if rays >= M.maxRaysPerFrame then goto continue end
+          if rays >= M.maxRaysPerFrame or (rays > 0 and timer:stop() >= M.sampleBudgetMs) then goto continue end
           rays = rays + 1
           local cx, cz = (i + 0.5) * r, (k + 0.5) * r
           local bx, by = cx, -cz
           local startZ = feetY + M.above
           origin:set(bx, by, startZ)
-          local d = castRayStatic(origin, down, M.reach)
+          local hit = Engine.castRay(origin, origin + down * M.reach, true, false)
+          local d = hit and hit.dist
           local h = NONE
           if d and d < M.reach then h = startZ - d end
           if not c then c = {} cache[key] = c end
@@ -88,34 +91,26 @@ function M.update(feetX, feetY, feetZ)
   return { t = 'ter', r = r, c = list }
 end
 
--- Where the crosshair meets BeamNG's world (MC coords), for placing blocks on the
--- ground. eyeB = BeamNG eye position, dirB = BeamNG unit look direction.
-function M.aim(eyeB, dirB, maxDist)
-  local d = castRayStatic(eyeB, dirB, maxDist)
-  if not d or d >= maxDist then return nil end
-  local hit = eyeB + dirB * d
-  -- estimate the surface normal with two extra rays nudged sideways
-  local side = dirB:cross(vec3(0, 0, 1))
-  if side:squaredLength() < 1e-6 then side = vec3(1, 0, 0) end
-  side:normalize()
-  local up2 = side:cross(dirB)
-  local e = 0.05
-  local d1 = castRayStatic(eyeB + side * e, dirB, maxDist + 1)
-  local d2 = castRayStatic(eyeB + up2 * e, dirB, maxDist + 1)
-  local nx, ny, nz = 0, 0, 1
-  if d1 and d2 and d1 < maxDist + 1 and d2 < maxDist + 1 then
-    local p1 = eyeB + side * e + dirB * d1
-    local p2 = eyeB + up2 * e + dirB * d2
-    local nrm = (p1 - hit):cross(p2 - hit)
-    if nrm:squaredLength() > 1e-12 then
-      nrm:normalize()
-      if nrm:dot(dirB) > 0 then nrm = nrm * -1 end
-      nx, ny, nz = nrm.x, nrm.y, nrm.z
-    end
-  end
-  local mx, my, mz = coords.bngToMc(hit.x, hit.y, hit.z)
-  local mnx, mny, mnz = coords.bngToMc(nx, ny, nz)
-  return { x = mx, y = my, z = mz, nx = mnx, ny = mny, nz = mnz, d = d }
+function M.update(x,y,z)
+  if M.withoutBlocks then return M.withoutBlocks(function() return sample(x,y,z) end) end
+  return sample(x,y,z)
 end
 
+-- Where the crosshair meets BeamNG's world (MC coords), for placing blocks on the
+-- ground. eyeB = BeamNG eye position, dirB = BeamNG unit look direction.
+local function aim(eyeB, dirB, maxDist)
+  -- Scene raycasts respect disabled objects; the fast physics raycast reads a
+  -- cached triangle soup and can return MC geometry removed this very frame.
+  local res = Engine.castRay(eyeB, eyeB + dirB * maxDist, true, false)
+  if not res or res.dist >= maxDist then return nil end
+  local hit, normal = vec3(res.pt), vec3(res.norm)
+  local mx,my,mz = coords.bngToMc(hit.x,hit.y,hit.z)
+  local nx,ny,nz = coords.bngToMc(normal.x,normal.y,normal.z)
+  return {x=mx,y=my,z=mz,nx=nx,ny=ny,nz=nz,d=res.dist}
+end
+
+function M.aim(eye,dir,reach)
+  if M.withoutBlocks then return M.withoutBlocks(function() return aim(eye,dir,reach) end) end
+  return aim(eye,dir,reach)
+end
 return M

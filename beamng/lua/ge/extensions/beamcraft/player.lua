@@ -1,6 +1,5 @@
--- Steve in BeamNG: the third-person model (head, body, arms, legs from the skin,
--- animated with Minecraft's own walk/swing maths) and the first-person arm with the
--- held item.
+-- Steve in BeamNG: Minecraft's player model parts, animated from the exact
+-- ModelPart poses sent by the hidden client, plus a first-person arm and held item.
 
 local coords = require('beamcraft/coords')
 local mu = require('beamcraft/meshutil')
@@ -9,9 +8,11 @@ local M = {}
 
 local PX = 0.9375 / 16      -- one skin pixel in metres (Minecraft renders players at 15/16)
 local objs = {}             -- part name -> ProceduralMesh
-local fpArm, fpItem, tpItem
-local fpItemKey, tpItemKey
+local capeObj
+local fpArm, fpItem, tpItem, tpLeft
+local fpItemKey, tpItemKey, tpLeftKey
 local skin                  -- { material, slim }
+local armorSpec, armorKey
 local pi = math.pi
 
 M.visibleThird = false
@@ -22,40 +23,105 @@ local function partDefs(slim)
   local aw = slim and 3 or 4
   return {
     head = { pivot = { 0, 0, 24 }, box = { -4, -4, 0, 4, 4, 8 }, uv = { 0, 0, 8, 8, 8 }, over = { 32, 0 }, inflate = 0.5 },
-    body = { pivot = { 0, 0, 12 }, box = { -4, -2, 0, 4, 2, 12 }, uv = { 16, 16, 8, 12, 4 }, over = { 16, 32 }, inflate = 0.25 },
-    armR = { pivot = { 4 + aw / 2, 0, 22 }, box = { -aw / 2, -2, -10, aw / 2, 2, 2 }, uv = { 40, 16, aw, 12, 4 }, over = { 40, 32 }, inflate = 0.25 },
-    armL = { pivot = { -4 - aw / 2, 0, 22 }, box = { -aw / 2, -2, -10, aw / 2, 2, 2 }, uv = { 32, 48, aw, 12, 4 }, over = { 48, 48 }, inflate = 0.25 },
+    body = { pivot = { 0, 0, 24 }, box = { -4, -2, -12, 4, 2, 0 }, uv = { 16, 16, 8, 12, 4 }, over = { 16, 32 }, inflate = 0.25 },
+    armR = { pivot = { 5, 0, 22 }, box = { -1, -2, -10, aw - 1, 2, 2 }, uv = { 40, 16, aw, 12, 4 }, over = { 40, 32 }, inflate = 0.25 },
+    armL = { pivot = { -5, 0, 22 }, box = { 1 - aw, -2, -10, 1, 2, 2 }, uv = { 32, 48, aw, 12, 4 }, over = { 48, 48 }, inflate = 0.25 },
     legR = { pivot = { 2, 0, 12 }, box = { -2, -2, -12, 2, 2, 0 }, uv = { 0, 16, 4, 12, 4 }, over = { 0, 32 }, inflate = 0.25 },
     legL = { pivot = { -2, 0, 12 }, box = { -2, -2, -12, 2, 2, 0 }, uv = { 16, 48, 4, 12, 4 }, over = { 0, 48 }, inflate = 0.25 },
   }
 end
 
 local function partMesh(def)
-  local m = mu.newMesh(skin.material)
+  local m = mu.newMesh(skin.baseMaterial)
   local b, uv = def.box, def.uv
-  mu.addUvBox(m, b[1] * PX, b[2] * PX, b[3] * PX, b[4] * PX, b[5] * PX, b[6] * PX, uv[1], uv[2], uv[3], uv[4], uv[5], 64, 64)
-  local i = def.inflate
-  mu.addUvBox(m, (b[1] - i) * PX, (b[2] - i) * PX, (b[3] - i) * PX, (b[4] + i) * PX, (b[5] + i) * PX, (b[6] + i) * PX,
-    def.over[1], def.over[2], uv[3], uv[4], uv[5], 64, 64)
-  return m
+  mu.addUvBox(m, b[1] * PX, b[2] * PX, b[3] * PX, b[4] * PX, b[5] * PX, b[6] * PX, uv[1], uv[2], uv[3], uv[4], uv[5], 64, 64, true)
+  local meshes = { m }
+  if skin.overlays and skin.overlays[def.name] then
+    local outer = mu.newMesh(skin.outerMaterial)
+    local i = def.inflate
+    mu.addUvBox(outer, (b[1] - i) * PX, (b[2] - i) * PX, (b[3] - i) * PX, (b[4] + i) * PX, (b[5] + i) * PX, (b[6] + i) * PX,
+      def.over[1], def.over[2], uv[3], uv[4], uv[5], 64, 64, true)
+    meshes[#meshes + 1] = outer
+  end
+  local slots = {
+    head = { 'head' }, body = { 'chest', 'legs' },
+    armR = { 'chest' }, armL = { 'chest' },
+    legR = { 'legs', 'feet' }, legL = { 'legs', 'feet' },
+  }
+  for _, slot in ipairs(slots[def.name] or {}) do
+    local armor = skin.armor and skin.armor[slot]
+    if armor then
+      local m = mu.newMesh(armor.material)
+      local i = slot == 'legs' and 0.5 or 1
+      local u = uv
+      if def.name == 'armL' then u = { 40, 16, uv[3], 12, 4 } end
+      if def.name == 'legL' then u = { 0, 16, 4, 12, 4 } end
+      mu.addUvBox(m, (b[1] - i) * PX, (b[2] - i) * PX, (b[3] - i) * PX,
+        (b[4] + i) * PX, (b[5] + i) * PX, (b[6] + i) * PX,
+        u[1], u[2], u[3], u[4], u[5], 64, 32, true)
+      meshes[#meshes + 1] = m
+    end
+  end
+  return meshes
 end
 
 local defs
 
+local function attachArmorMaterials()
+  if not skin then return end
+  skin.armor = {}
+  for _, slot in ipairs({ 'head', 'chest', 'legs', 'feet' }) do
+    local piece = armorSpec and armorSpec[slot]
+    if piece and piece.texture then
+      local name = 'bc_armor_' .. slot .. '_' .. piece.texture:gsub('[^%w]', '_')
+      skin.armor[slot] = {
+        material = mu.textureMaterial(name, piece.texture, 'cutout', nil, piece.mask, true),
+      }
+    end
+  end
+  mu.flushMaterials()
+end
+
+function M.setArmor(pieces)
+  pieces = pieces or {}
+  local parts = {}
+  for _, slot in ipairs({ 'head', 'chest', 'legs', 'feet' }) do
+    local piece = pieces[slot]
+    parts[#parts + 1] = piece and piece.texture or ''
+  end
+  local key = table.concat(parts, '|')
+  if key == armorKey then return end
+  armorKey, armorSpec = key, pieces
+  M.destroy()
+  attachArmorMaterials()
+end
+
 -- called when Minecraft sends the gui assets (skin texture)
-function M.setSkin(dir, slim, file)
+function M.setSkin(dir, slim, file, overlays, maskFile, capeFile)
   M.destroy()
   file = file or 'skin.png'
   local name = 'bc_skin_' .. (tostring(dir) .. '_' .. file):gsub('[^%w]', '_')
-  skin = { material = mu.textureMaterial(name, dir .. '/' .. file, 'cutout'), slim = slim }
-  mu.flushMaterials()
+  skin = {
+    baseMaterial = mu.textureMaterial(name .. '_base', dir .. '/' .. file, 'solid', nil, nil, true),
+    outerMaterial = mu.textureMaterial(name .. '_outer', dir .. '/' .. file, 'cutout', nil,
+      maskFile and (dir .. '/' .. maskFile) or nil, true),
+    capeMaterial = capeFile and mu.textureMaterial(name .. '_cape', dir .. '/' .. capeFile, 'solid', nil, nil, true),
+    slim = slim, overlays = overlays,
+  }
+  attachArmorMaterials()
   defs = partDefs(slim)
+  for partName, def in pairs(defs) do def.name = partName end
 end
 
 local function ensureParts()
   if objs.head or not skin then return objs.head ~= nil end
-  for name, def in pairs(defs) do objs[name] = mu.newObject('beamcraft_steve_' .. name, { partMesh(def) }) end
-  fpArm = mu.newObject('beamcraft_fparm', { partMesh(defs.armR) })
+  for name, def in pairs(defs) do objs[name] = mu.newObject('beamcraft_steve_' .. name, partMesh(def)) end
+  fpArm = mu.newObject('beamcraft_fparm', partMesh(defs.armR))
+  if skin.capeMaterial then
+    local m = mu.newMesh(skin.capeMaterial)
+    mu.addUvBox(m, -5 * PX, 0, -16 * PX, 5 * PX, 1 * PX, 0, 0, 0, 10, 16, 1, 64, 32, true)
+    capeObj = mu.newObject('beamcraft_cape', { m })
+  end
   return true
 end
 
@@ -64,6 +130,8 @@ function M.destroy()
   mu.deleteObject(fpArm) fpArm = nil
   mu.deleteObject(fpItem) fpItem = nil fpItemKey = nil
   mu.deleteObject(tpItem) tpItem = nil tpItemKey = nil
+  mu.deleteObject(tpLeft) tpLeft = nil tpLeftKey = nil
+  mu.deleteObject(capeObj) capeObj = nil
 end
 
 local HIDE = -100000
@@ -92,52 +160,69 @@ end
 -- third person
 ------------------------------------------------------------------------------
 
+-- Rotate Minecraft model coordinates (-X, -Z, -Y) into BeamNG character space.
+-- Minecraft's ModelPart applies Z, then Y, then X Euler rotations.
+local s2 = math.sqrt(0.5)
+local mcToBeam = { 0, s2, -s2, 0 }
+local beamToMc = { 0, -s2, s2, 0 }
+local function modelRotation(part)
+  local q = part[7] and { part[7], part[8], part[9], part[10] } or
+    mu.qmul(mu.qaxis(0, 0, 1, part[6]),
+      mu.qmul(mu.qaxis(0, 1, 0, part[5]), mu.qaxis(1, 0, 0, part[4])))
+  return mu.qmul(mu.qmul(mcToBeam, q), beamToMc)
+end
+
 -- snap = interpolated pose { x,y,z (MC feet), by (body yaw), hy (head yaw), pitch,
--- lp, ls (limb swing pos/speed), sw (attack anim 0..1), cr (crouching), held, hs }
+-- m (vanilla ModelPart poses), held, hs }
 function M.updateThird(snap, ctx)
   if not M.visibleThird or not snap or not ensureParts() then
     for _, o in pairs(objs) do hide(o) end
     hide(tpItem)
+    hide(tpLeft)
+    hide(capeObj)
     return
   end
   local bx, by, bz = coords.mcToBng(snap.x, snap.y, snap.z)
-  -- character +Y (forward) -> Minecraft facing; see coords.lua for the yaw mapping
   local yawB = pi - math.rad(snap.by or 0)
   local qBody = mu.qaxis(0, 0, 1, yawB)
-  local crouch = (snap.cr == 1)
-
-  local t = (snap.lp or 0) * 0.6662
-  local ls = math.min(1, snap.ls or 0)
-  local swing = math.sin((snap.sw or 0) * pi)
-  local headYaw = math.rad((snap.hy or snap.by or 0) - (snap.by or 0))
-  local rot = {
-    head = mu.qmul(mu.qaxis(0, 0, 1, -headYaw), mu.qaxis(1, 0, 0, -math.rad(snap.pitch or 0))),
-    body = crouch and mu.qaxis(1, 0, 0, 0.5) or mu.IDENTITY,
-    armR = mu.qaxis(1, 0, 0, math.cos(t + pi) * ls + swing * 1.4 + (crouch and 0.4 or 0)),
-    armL = mu.qaxis(1, 0, 0, math.cos(t) * ls + (crouch and 0.4 or 0)),
-    legR = mu.qaxis(1, 0, 0, math.cos(t) * 1.4 * ls),
-    legL = mu.qaxis(1, 0, 0, math.cos(t + pi) * 1.4 * ls),
-  }
-  local drop = crouch and 3.2 or 0  -- crouching lowers the upper body (px)
+  local worldParts = {}
   for name, def in pairs(defs) do
-    local pv = def.pivot
-    local pz = pv[3] - ((name ~= 'legR' and name ~= 'legL') and drop or 0)
-    local wx, wy, wz = mu.qrot(qBody, pv[1] * PX, pv[2] * PX, pz * PX)
-    mu.setXform(objs[name], bx + wx, by + wy, bz + wz, mu.qmul(qBody, rot[name]))
+    local part = snap.m and snap.m[name]
+    local px, py, pz, q
+    if part then
+      local ox, oy, oz = mu.qrot(qBody, -part[1] * PX, -part[3] * PX, (24 - part[2]) * PX)
+      px, py, pz = bx + ox, by + oy, bz + oz
+      q = mu.qmul(qBody, modelRotation(part))
+    else
+      -- A client without model poses still has a stable standing player.
+      local pv = def.pivot
+      local ox, oy, oz = mu.qrot(qBody, pv[1] * PX, pv[2] * PX, pv[3] * PX)
+      px, py, pz, q = bx + ox, by + oy, bz + oz, qBody
+    end
+    mu.setXform(objs[name], px, py, pz, q)
+    worldParts[name] = { px, py, pz, q }
   end
 
-  -- held item in the right hand
-  local key = snap.held and (snap.held .. '/' .. tostring(snap.hs)) or nil
-  if key ~= tpItemKey then
-    mu.deleteObject(tpItem)
-    tpItem, tpItemKey = heldObject('tpitem', snap.held, snap.hs, ctx, 0.25, 0.4), key
+  local cape = snap.m and snap.m.cape
+  if capeObj and cape and worldParts.body then
+    local body = worldParts.body
+    local ox, oy, oz = mu.qrot(body[4], -cape[1] * PX, -cape[3] * PX, -cape[2] * PX)
+    mu.setXform(capeObj, body[1] + ox, body[2] + oy, body[3] + oz,
+      mu.qmul(body[4], modelRotation(cape)))
+  else
+    hide(capeObj)
   end
-  if tpItem then
-    local qa = mu.qmul(qBody, rot.armR)
-    local pv = defs.armR.pivot
-    local sx, sy, sz = mu.qrot(qBody, pv[1] * PX, pv[2] * PX, (pv[3] - drop) * PX)
-    local hx, hy, hz = mu.qrot(qa, 0, 2 * PX, -10 * PX)
-    mu.setXform(tpItem, bx + sx + hx, by + sy + hy, bz + sz + hz, qa)
+
+  -- Mesh vertices already include vanilla's item and hand transforms. Attach at
+  -- the ModelPart pivot; applying another offset here would double-transform it.
+  if snap.ir ~= tpItemKey or (snap.ir and not tpItem) then
+    mu.deleteObject(tpItem) tpItem = snap.ir and ctx.items.object(snap.ir, 'beamcraft_tpitem') or nil tpItemKey = snap.ir
+  end
+  if snap.il ~= tpLeftKey or (snap.il and not tpLeft) then
+    mu.deleteObject(tpLeft) tpLeft = snap.il and ctx.items.object(snap.il, 'beamcraft_tpitem_left') or nil tpLeftKey = snap.il
+  end
+  for _, hand in ipairs({{tpItem,worldParts.armR},{tpLeft,worldParts.armL}}) do
+    if hand[1] and hand[2] then local arm=hand[2] mu.setXform(hand[1],arm[1],arm[2],arm[3],arm[4]) end
   end
 end
 

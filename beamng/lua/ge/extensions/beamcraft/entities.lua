@@ -27,6 +27,7 @@ function M.snapshot(msg, now, ctx)
       ents[id] = ent
       ent.obj = M.makeObject(kind, e[9], ctx)
     end
+    if not ent.obj then ent.obj = M.makeObject(kind, e[9], ctx) end
     ent.prev = ent.cur
     ent.cur = { e[3], e[4], e[5] }
     ent.yaw = e[6]
@@ -47,9 +48,7 @@ function M.makeObject(kind, extra, ctx)
   if kind == 'b' and ctx.world.getStateQuads(extra) then
     meshes = mu.blockMeshes(ctx.world.getStateQuads(extra), 1.0, ctx.world.matFor)
   elseif kind == 'i' then
-    local m = mu.newMesh(mu.textureMaterial('bc_icon_' .. tostring(extra):gsub('[^%w]', '_'), ctx.iconPath(extra), 'cutout'))
-    mu.addFlatQuad(m, 0.42)
-    meshes = { m }
+    return extra and ctx.items.object(extra, 'beamcraft_ent_item') or nil
   elseif kind == 'x' then
     local id = 'minecraft:experience_bottle'
     local m = mu.newMesh(mu.textureMaterial('bc_icon_' .. id:gsub('[^%w]', '_'), ctx.iconPath(id), 'cutout'))
@@ -88,7 +87,7 @@ function M.update(now, camPos)
         -- spin and bob like a dropped item
         local spin = (now * 1.6 + id * 0.37) % (2 * pi)
         local bob = 0.1 + math.sin(now * 2.5 + id) * 0.05
-        mu.setXform(ent.obj, bx, by, bz + 0.21 + bob, mu.qaxis(0, 0, 1, spin))
+        mu.setXform(ent.obj, bx, by, bz + bob, mu.qaxis(0, 0, 1, spin))
       else
         -- full block, centred on its feet position
         mu.setXform(ent.obj, bx, by, bz + 0.5, mu.IDENTITY)

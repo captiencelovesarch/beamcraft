@@ -205,6 +205,11 @@ public final class ModelExport {
 		boolean collides = !state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).isEmpty();
 		o.addProperty("o", opaque ? 1 : 0);
 		o.addProperty("c", collides ? 1 : 0);
+		JsonArray bounds = new JsonArray();
+		for (var box : state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO).toAabbs()) {
+			JsonArray a = new JsonArray(); a.add(box.minX); a.add(box.minY); a.add(box.minZ); a.add(box.maxX); a.add(box.maxY); a.add(box.maxZ); bounds.add(a);
+		}
+		o.add("a", bounds);
 		o.addProperty("g", groundType(state));
 		o.addProperty("n", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
 		JsonArray q = new JsonArray();
