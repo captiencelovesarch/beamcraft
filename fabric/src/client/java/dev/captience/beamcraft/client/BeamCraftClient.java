@@ -617,6 +617,10 @@ public class BeamCraftClient implements ClientModInitializer {
 	private void endTick(Minecraft mc) {
 		manageWorld(mc);
 		checkRespawn(mc);
+		// slopes walk like ramps (see TerrainColumns.keepOnGround)
+		if (controlling && !awaitTerrain && mc.player != null && !mc.player.getAbilities().flying) {
+			TerrainColumns.keepOnGround(mc.player, mc.player.onGround() || mc.player.fallDistance < 0.7);
+		}
 		if (!Bridge.isConnected()) return;
 		manageAtlas(mc);
 		manageGui(mc);

@@ -63,7 +63,17 @@ public abstract class LevelCollisionMixin implements CollisionGetter {
 		Level self = (Level) (Object) this;
 		Iterable<VoxelShape> blocks = () -> new BlockCollisions<>(self, source, box, false, (p, shape) -> shape);
 		if (!TerrainColumns.appliesTo(self)) return blocks;
-		List<VoxelShape> terrain = TerrainColumns.shapesFor(box);
+		// The server's copy of Steve doesn't simulate movement (the client does), but its
+		// "moved into a block" check rejected every step that ended slightly inside a
+		// ground column - on slopes that was every tick: walk, snap back, walk.
+		if (source instanceof net.minecraft.world.phys.shapes.EntityCollisionContext sc
+			&& sc.getEntity() instanceof net.minecraft.server.level.ServerPlayer) return blocks;
+		double feet = Double.NaN;
+		if (source instanceof net.minecraft.world.phys.shapes.EntityCollisionContext ec
+			&& ec.getEntity() instanceof net.minecraft.world.entity.LivingEntity le && !le.isFallFlying()) {
+			feet = le.getY();
+		}
+		List<VoxelShape> terrain = TerrainColumns.shapesFor(box, feet);
 		return terrain.isEmpty() ? blocks : Iterables.concat(blocks, terrain);
 	}
 }

@@ -139,7 +139,9 @@ public final class MobSupport {
 			// caught inside BeamNG's ground (it arrived under a mob that had already
 			// dropped a little): collision never pushes out, so it would sink through.
 			// Put it back on top.
-			if (top > TerrainColumns.NONE + 1 && mob.getY() < top - 0.01 && mob.getY() > top - 4) {
+			TerrainColumns.keepOnGround(mob, mob.onGround() || mob.fallDistance < 0.7);
+			top = TerrainColumns.heightAt(mob.getX(), mob.getZ());
+			if (top > TerrainColumns.NONE + 1 && mob.getY() < top - TerrainColumns.STEP - 0.01 && mob.getY() > top - 4) {
 				mob.setPos(mob.getX(), top + 0.001, mob.getZ());
 				Vec3 v = mob.getDeltaMovement();
 				mob.setDeltaMovement(v.x, Math.max(0, v.y), v.z);

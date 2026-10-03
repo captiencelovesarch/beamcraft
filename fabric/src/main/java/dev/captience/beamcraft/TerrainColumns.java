@@ -71,6 +71,45 @@ public final class TerrainColumns {
 		vehicleBoxes = boxes;
 	}
 
+	/**
+	 * BeamNG's surface at (x, z), bilinear between column centres: a ramp, not steps.
+	 * Null if a neighbouring column is unknown or empty; if neighbours differ by more
+	 * than a step (a wall, a kerb) the column's own height.
+	 */
+	public static Float smoothHeight(double x, double z) {
+		double r = res;
+		double fx = x / r - 0.5, fz = z / r - 0.5;
+		int i = Mth.floor(fx), k = Mth.floor(fz);
+		Float a = HEIGHTS.get(key(i, k)), b = HEIGHTS.get(key(i + 1, k)), c = HEIGHTS.get(key(i, k + 1)), d = HEIGHTS.get(key(i + 1, k + 1));
+		Float own = heightAt(x, z);
+		if (a == null || b == null || c == null || d == null) return own;
+		if (a <= NONE + 1 || b <= NONE + 1 || c <= NONE + 1 || d <= NONE + 1) return own;
+		float lo = Math.min(Math.min(a, b), Math.min(c, d)), hi = Math.max(Math.max(a, b), Math.max(c, d));
+		if (hi - lo > STEP) return own;
+		double tx = fx - i, tz = fz - k;
+		return (float) Mth.lerp(tz, Mth.lerp(tx, a, b), Mth.lerp(tx, c, d));
+	}
+
+	/**
+	 * Stick a walking entity to BeamNG's (smoothed) surface: up small rises and down
+	 * small drops, so slopes walk like ramps. Call after the entity moved this tick.
+	 */
+	public static void keepOnGround(net.minecraft.world.entity.LivingEntity e, boolean wasOnGround) {
+		if (!enabled || e.isNoGravity() || e.isInWater() || e.isPassenger() || e.isFallFlying()) return;
+		var v = e.getDeltaMovement();
+		if (v.y > 0.05) return; // jumping
+		Float h = smoothHeight(e.getX(), e.getZ());
+		if (h == null || h <= NONE + 1) return;
+		double dy = h - e.getY();
+		boolean up = dy > 0.001 && dy <= STEP;
+		boolean down = wasOnGround && dy < -0.001 && dy >= -STEP;
+		if (!up && !down) return;
+		e.setPos(e.getX(), h, e.getZ());
+		e.setDeltaMovement(v.x, 0, v.z);
+		e.setOnGround(true);
+		e.fallDistance = 0;
+	}
+
 	/** True once any ground under (x, z) is known. */
 	public static boolean hasGroundAt(double x, double z) {
 		Float h = HEIGHTS.get(key(Mth.floor(x / res), Mth.floor(z / res)));
@@ -115,7 +154,21 @@ public final class TerrainColumns {
 		return enabled && level.dimension() == Level.OVERWORLD;
 	}
 
+	/** Steps up to this high count as floor, not wall, for walking entities. */
+	public static final double STEP = 0.6;
+
 	public static List<VoxelShape> shapesFor(AABB box) {
+		return shapesFor(box, Double.NaN);
+	}
+
+	/**
+	 * feetY: the walking entity's feet, or NaN. BeamNG's slopes arrive as 0.5 m columns
+	 * with flat tops, a staircase: walking into a 5 cm step every half metre cost Steve
+	 * his speed on the slightest slope. Columns whose top is less than STEP above the
+	 * feet stop at the feet instead (a floor, not a wall); keepOnGround() then lifts
+	 * the entity onto the smoothed surface.
+	 */
+	public static List<VoxelShape> shapesFor(AABB box, double feetY) {
 		if (!enabled) return List.of();
 		List<VoxelShape> out = null;
 		for (AABB v : vehicleBoxes) {
@@ -135,6 +188,7 @@ public final class TerrainColumns {
 				Float h = HEIGHTS.get(key(i, k));
 				if (h == null || h <= NONE + 1) continue;
 				double top = h, bottom = h - DEPTH;
+				if (!Double.isNaN(feetY) && top > feetY && top <= feetY + STEP) top = Math.max(bottom + 0.01, feetY);
 				if (top < box.minY || bottom > box.maxY) continue;
 				if (out == null) out = new ArrayList<>();
 				out.add(Shapes.create(i * r, bottom, k * r, (i + 1) * r, top, (k + 1) * r));
