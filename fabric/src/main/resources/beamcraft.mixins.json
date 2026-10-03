@@ -10,7 +10,8 @@
 		"PathfindingContextMixin",
 		"PathNavigationMixin",
 		"LivingEntitySounds",
-		"ClipContextAccess"
+		"ClipContextAccess",
+		"ServerMoveCheckMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

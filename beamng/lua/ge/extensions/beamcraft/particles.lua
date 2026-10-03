@@ -19,6 +19,10 @@ local stamp = 0
 local HIDE = -100000
 
 local function step(v, n) return math.floor(math.max(0, math.min(1, v)) * n + 0.5) / n end
+-- rebuild the meshes at most this often (Minecraft moves particles 20 times a second;
+-- rebuilding every frame cost several ms with a fight's worth of particles)
+M.rebuildInterval = 1 / 30
+local lastBuild = -1
 
 function M.snapshot(msg, now)
   stamp = stamp + 1
@@ -36,7 +40,8 @@ function M.snapshot(msg, now)
 end
 
 local function groupFor(p)
-  local r, g, b, a = step(p.r, 16), step(p.g, 16), step(p.b, 16), step(p.a, 8)
+  -- coarse tint steps: each distinct tint is its own material
+  local r, g, b, a = step(p.r, 8), step(p.g, 8), step(p.b, 8), step(p.a, 4)
   local key = p.tex .. ':' .. r .. ':' .. g .. ':' .. b .. ':' .. a
   local grp = groups[key]
   if not grp then
@@ -53,6 +58,8 @@ local function groupFor(p)
 end
 
 function M.update(now)
+  if next(particles) ~= nil and now - lastBuild < M.rebuildInterval then return end
+  lastBuild = now
   for _, grp in pairs(groups) do grp.mesh = nil end
   if next(particles) == nil then
     for _, grp in pairs(groups) do

@@ -252,15 +252,25 @@ function M.textureMaterial(name, texture, kind, ground, opacityTexture, matte)
   return M.material(name, def)
 end
 
+-- Only the new definitions go to a fresh file each time: rewriting and reloading
+-- every material ever made (hundreds, with particle tints) cost up to 60 ms per new
+-- material, and fights spawn lots of them.
+local flushCount = 0
+local GEN = '/beamcraft/generated/'
 function M.flushMaterials()
   if next(pending) == nil then return end
-  local all = {}
-  for n, d in pairs(known) do all[n] = d end
-  for n, d in pairs(pending) do all[n] = d known[n] = d end
+  local batch = {}
+  for n, d in pairs(pending) do batch[n] = d known[n] = d end
   pending = {}
-  local path = '/beamcraft/generated/beamcraft.materials.json'
-  jsonWriteFile(path, all, true)
+  flushCount = flushCount + 1
+  local path = string.format('%sm_%d.materials.json', GEN, flushCount)
+  jsonWriteFile(path, batch, false)
   loadJsonMaterialsFile(path)
+end
+
+-- material batches from an earlier run (BeamNG keeps what it loaded in memory)
+function M.cleanGenerated()
+  for _, f in ipairs(FS:findFiles(GEN, 'm_*.materials.json', 0, false, false) or {}) do FS:removeFile(f) end
 end
 
 function M.reloadMaterials(prefix)

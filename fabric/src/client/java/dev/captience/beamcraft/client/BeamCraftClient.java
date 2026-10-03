@@ -178,6 +178,7 @@ public class BeamCraftClient implements ClientModInitializer {
 	/** Where you last entered BeamCraft: your spawn point (the world's is out in the void). */
 	private double[] spawnPoint;
 	private LocalPlayer lastPlayer;
+	private net.minecraft.world.phys.Vec3 lastTickPos;
 	private int awaitTicks;
 	private boolean guiSent;
 	private Path iconsDir;
@@ -617,6 +618,21 @@ public class BeamCraftClient implements ClientModInitializer {
 	private void endTick(Minecraft mc) {
 		manageWorld(mc);
 		checkRespawn(mc);
+		// teleported (/tp, ender pearl, chorus fruit) onto ground BeamNG hasn't scanned:
+		// hold him there like entering, instead of letting him drop into the void
+		if (controlling && mc.player != null && !awaitTerrain) {
+			LocalPlayer p = mc.player;
+			double jump = lastTickPos == null ? 0 : p.position().distanceToSqr(lastTickPos);
+			lastTickPos = p.position();
+			if (jump > 16 * 16 && !TerrainColumns.hasGroundAt(p.getX(), p.getZ())) {
+				awaitTerrain = true;
+				awaitTicks = 0;
+				enterTarget = new double[] {p.getX(), p.getY(), p.getZ(), p.getYRot()};
+				p.setNoGravity(true);
+				p.setDeltaMovement(0, 0, 0);
+				LOG.info("Teleported to unscanned ground: holding until BeamNG samples it");
+			}
+		}
 		// slopes walk like ramps (see TerrainColumns.keepOnGround)
 		if (controlling && !awaitTerrain && mc.player != null && !mc.player.getAbilities().flying) {
 			TerrainColumns.keepOnGround(mc.player, mc.player.onGround() || mc.player.fallDistance < 0.7);

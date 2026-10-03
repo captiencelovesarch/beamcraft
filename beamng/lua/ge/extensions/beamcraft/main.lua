@@ -694,6 +694,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 end
 
 local function onExtensionLoaded()
+  mu.cleanGenerated()
   -- a Lua reload can leave our action map pushed (it binds F5, E, 1-9...): drop it
   popActionMap('BeamCraft')
   -- a reload whose unload failed leaves meshes behind: sweep anything of ours
