@@ -587,7 +587,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   world.update(dtReal)
   obstacleTimer = obstacleTimer + dtReal
-  if obstacleTimer >= 0.1 then obstacleTimer = 0 vehicles.updateObstacles(world) end
+  if obstacleTimer >= 0.1 then obstacleTimer = 0 vehicles.updateObstacles(world, now) end
   overlay.update(dtReal, active and net.isConnected())
 
   frames, frameTime = frames + 1, frameTime + dtReal

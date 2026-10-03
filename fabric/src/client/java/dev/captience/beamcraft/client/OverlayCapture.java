@@ -225,9 +225,16 @@ public final class OverlayCapture {
 	private static boolean tileChanged(int[] cur, int[] old, int w, int h, int x0, int y0, int x1, int y1) {
 		for (int y = y0; y < y1; y++) {
 			int row = (h - 1 - y) * w;
-			for (int x = x0; x < x1; x++) {
-				int a = cur[row + x], b = old[row + x];
-				if (a != b && ((a >>> 24) != 0 || (b >>> 24) != 0)) return true;
+			int from = row + x0, to = row + x1;
+			// Arrays.mismatch is a vectorized JIT intrinsic: the per-pixel loop it
+			// replaces was the overlay encoder's whole cost (~60% of a core)
+			while (from < to) {
+				int i = java.util.Arrays.mismatch(cur, from, to, old, from, to);
+				if (i < 0) break;
+				int a = cur[from + i], b = old[from + i];
+				// fully transparent either way: no visible change
+				if ((a >>> 24) != 0 || (b >>> 24) != 0) return true;
+				from += i + 1;
 			}
 		}
 		return false;

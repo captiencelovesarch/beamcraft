@@ -7,6 +7,7 @@ local coords = require('beamcraft/coords')
 local M = {}
 
 M.boxRadius = 25        -- send collision for cars within this many metres of Steve
+M.targetRadius = 8      -- ...and make them hittable within this (plus the car's size)
 M.hitSpeed = 3.0        -- m/s relative speed before a car hurts
 M.punchSpeed = 1.8      -- m/s a punch adds to the whole car
 M.punchDent = 220       -- per-node shove of the panel you hit (dv * 1/s)
@@ -34,7 +35,10 @@ function M.collisionBoxes(steveB)
   local out, targets = {}, {}
   eachVehicle(function(veh)
     local c, ax, he = oobbParts(veh)
-    if (c - steveB):length() > M.boxRadius then return end
+    local dist = (c - steveB):length()
+    if dist > M.boxRadius then return end
+    -- hittable slices only within reach: each one is an entity Minecraft ticks
+    local hittable = dist < M.targetRadius + math.max(he.x, he.y, he.z)
     local hev = { he.x, he.y, he.z }
     -- longest axis that is mostly horizontal
     local L, best = 1, -1
@@ -56,7 +60,7 @@ function M.collisionBoxes(steveB)
       -- BeamNG box -> MC box: x = x, y = z, z = -y
       local box = { cc.x - ex, cc.z - ez, -(cc.y + ey), cc.x + ex, cc.z + ez, -(cc.y - ey) }
       out[#out + 1] = box
-      targets[#targets + 1] = {veh:getID() * 32 + k, veh:getID(), unpack(box)}
+      if hittable then targets[#targets + 1] = {veh:getID() * 32 + k, veh:getID(), unpack(box)} end
     end
   end)
   return out, targets
@@ -212,6 +216,21 @@ function M.explode(x, y, z, r, now)
   end)
 end
 
+-- Set the flammable part nearest the hit alight (fire.lua); level 2+ also lights its
+-- neighbours. Cars with nothing flammable nearby get one random small fire.
+local IGNITE = [[
+local hp = vec3(%f, %f, %f) local level = %d
+if fire and fire.flammableNodes then
+  local pos = obj:getPosition() local best, bd = nil, 6.25
+  for cid in pairs(fire.flammableNodes) do
+    local d = (pos + obj:getNodePosition(cid) - hp):squaredLength()
+    if d < bd then bd, best = d, cid end
+    if level >= 2 and d < 0.8 then fire.igniteNode(cid) end
+  end
+  if best then fire.igniteNode(best) elseif fire.igniteRandomNodeMinimal then fire.igniteRandomNodeMinimal() end
+end
+]]
+
 -- A wind charge: no damage, a shove. Vanilla knocks entities back within 2x the
 -- radius; cars get the whole body pushed away from the burst (and a bit up), so
 -- they slide, hop or tip rather than crumple.
@@ -258,10 +277,17 @@ function M.hit(m, now, eye)
   local x, y, z = coords.mcToBng(m.x, m.y, m.z)
   local dx, dy, dz = coords.mcToBng(m.dx, m.dy, m.dz)
   local damage = math.max(0, math.min(200, m.dmg or 1))
+  if m.lightning then damage = math.max(damage, 45) end -- a bolt from the sky, not 5 hp
   log('I', 'beamcraft', string.format('hit car %d for %.1f damage', m.id, damage))
-  -- the whole car rocks a little; heavy hits shove it
-  local push = vec3(dx, dy, dz) * math.min(10, damage * 0.15)
-  veh:applyClusterVelocityScaleAdd(veh:getRefNodeId(), 1, push.x, push.y, math.max(-1, push.z) + 0.1)
+  -- the whole car rocks a little; heavy hits shove it; Knockback/Punch (and sprint
+  -- hits) send it flying like they would a mob: +4 m/s per level, a bit of lift
+  local kb = m.kb or 0
+  local push = vec3(dx, dy, dz) * (math.min(10, damage * 0.15) + kb * 4)
+  veh:applyClusterVelocityScaleAdd(veh:getRefNodeId(), 1, push.x, push.y, math.max(-1, push.z) + 0.1 + kb * 1.2)
+  -- Fire Aspect, Flame arrows, burning hits, lightning: the car catches fire where hit
+  if (m.fire or 0) > 0 then
+    veh:queueLuaCommand(string.format(IGNITE, x, y, z, m.fire))
+  end
   local radius = math.min(1.8, M.dentRadiusBase + damage * M.dentRadiusPerDamage)
   local dv = math.min(300, 6 + damage * M.dentPerDamage)
   local tear = damage >= M.tearFromDamage and math.min(0.6, damage * M.tearRadiusPerDamage) or 0
@@ -270,11 +296,22 @@ function M.hit(m, now, eye)
   veh:queueLuaCommand(string.format(DENT, eye.x, eye.y, eye.z, dx, dy, dz, x, y, z, radius, dv, tear))
 end
 
-function M.updateObstacles(world)
+-- AI drivers brake for what you built. Only tell a car when its answer changes (or
+-- every second while something is ahead): with traffic this ran a Lua command in every
+-- car ten times a second for nothing.
+local obstacleSent = {}
+function M.updateObstacles(world, now)
+  if world.getTotalBlocks() == 0 then return end
   eachVehicle(function(veh)
-    local speed=veh:getVelocity():length()
-    local distance=world.obstacleDistance(veh, math.min(180,8+speed*0.5+speed*speed/8))
-    veh:queueLuaCommand(string.format("extensions.load('beamcraftObstacles'); extensions.beamcraftObstacles.setDistance(%f)",distance or -1))
+    local id = veh:getID()
+    local speed = veh:getVelocity():length()
+    local distance = world.obstacleDistance(veh, math.min(180, 8 + speed * 0.5 + speed * speed / 8))
+    local q = distance and math.floor(distance * 2) or -1
+    local last = obstacleSent[id]
+    if last and last.q == q and (q < 0 or now - last.at < 1) then return end
+    obstacleSent[id] = { q = q, at = now }
+    local load = last and '' or "extensions.load('beamcraftObstacles'); "
+    veh:queueLuaCommand(string.format("%sextensions.beamcraftObstacles.setDistance(%f)", load, distance or -1))
   end)
 end
 return M

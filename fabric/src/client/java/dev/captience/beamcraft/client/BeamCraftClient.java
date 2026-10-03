@@ -82,6 +82,32 @@ public class BeamCraftClient implements ClientModInitializer {
 		return listener;
 	}
 
+	/**
+	 * Run below BeamNG: its physics threads sync with each other, so a busy Minecraft on
+	 * the same cores dragged the whole game down (traffic: 30 fps). Linux priority is
+	 * per thread and Gradle's daemon forks us at its own, so every thread of ours gets
+	 * reniced, again every 10 s for threads started since.
+	 */
+	private static void lowerPriority() {
+		Thread t = new Thread(() -> {
+			while (true) {
+				try (var tasks = java.nio.file.Files.list(Path.of("/proc/self/task"))) {
+					var cmd = new java.util.ArrayList<String>(java.util.List.of("renice", "-n", "8", "-p"));
+					tasks.forEach(p -> cmd.add(p.getFileName().toString()));
+					new ProcessBuilder(cmd).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start().waitFor();
+					Thread.sleep(10_000);
+				} catch (InterruptedException e) {
+					return;
+				} catch (Exception e) {
+					LOG.debug("renice failed", e);
+					return;
+				}
+			}
+		}, "BeamCraft-Priority");
+		t.setDaemon(true);
+		t.start();
+	}
+
 	/** A Minecraft sound event as a file BeamNG can play, then tell BeamNG where. */
 	private void playInBeamNG(Identifier event, double x, double y, double z, float volume, float pitch) {
 		Minecraft mc = Minecraft.getInstance();
@@ -124,7 +150,9 @@ public class BeamCraftClient implements ClientModInitializer {
 
 	/** Frame rate the hidden client renders (and streams its overlay) at: BeamNG's own. */
 	public static int targetFps() {
-		return targetFps;
+		// While you drive nobody sees the overlay: just keep the client alive. (Rendering
+		// it at 120+ fps regardless used to cost BeamNG two thirds of its frame rate.)
+		return controlling ? targetFps : 15;
 	}
 
 	public static boolean isControlling() {
@@ -167,6 +195,7 @@ public class BeamCraftClient implements ClientModInitializer {
 	public void onInitializeClient() {
 		instance = this;
 		dev.captience.beamcraft.MobSupport.soundSink = this::playInBeamNG;
+		if (HEADLESS) lowerPriority();
 		LOG.info("BeamCraft client starting (headless={})", HEADLESS);
 		net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry.register(dev.captience.beamcraft.VehicleTargets.TYPE, ctx -> new net.minecraft.client.renderer.entity.EntityRenderer<dev.captience.beamcraft.VehicleTargets.Target, net.minecraft.client.renderer.entity.state.EntityRenderState>(ctx) {
 			public net.minecraft.client.renderer.entity.state.EntityRenderState createRenderState() { return new net.minecraft.client.renderer.entity.state.EntityRenderState(); }
@@ -335,7 +364,9 @@ public class BeamCraftClient implements ClientModInitializer {
 			case "viewport" -> applyViewport(mc, m.get("vw").getAsInt(), m.get("vh").getAsInt());
 			// Render ahead of BeamNG so a pull normally finds the next Minecraft
 			// frame within one game tick rather than waiting for two unsynced 60 Hz clocks.
-			case "fps" -> targetFps = Math.max(120, Math.min(240, (int) Math.round(num(m, "fps") * 1.5)));
+			// Match BeamNG's frame rate (a little above, so a pull rarely waits a whole
+			// frame); every extra Minecraft frame competes with BeamNG for the GPU
+			case "fps" -> targetFps = Math.max(20, Math.min(240, (int) Math.round(num(m, "fps") * 1.1) + 2));
 			case "time" -> setTimeOfDay(mc, num(m, "tod"));
 			case "oin" -> OverlayServer.INPUT.add(m.getAsJsonObject("e")); // overlay input relayed by BeamNG's Lua
 			case "hurt" -> onHurt(mc, m);

@@ -18,6 +18,7 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.*;
+import net.minecraft.world.item.ItemStack;
 
 /** Invisible combat targets; TerrainColumns supplies the actual solid car geometry. */
 public final class VehicleTargets {
@@ -66,21 +67,58 @@ public final class VehicleTargets {
         @Override public float getPickRadius() { return 0.1f; }
         @Override public boolean isPushable() { return false; }
         @Override public boolean canBeCollidedWith(Entity e) { return false; }
+        private Vec3 lastHit;
+
         @Override public boolean hurtServer(ServerLevel level, DamageSource source, float damage) {
             Box b = boxes.get(getEntityData().get(KEY));
-            if (b == null || !(source.getEntity() instanceof Player p)) return false;
+            if (b == null) return false;
+            boolean lightning = source.is(net.minecraft.tags.DamageTypeTags.IS_LIGHTNING);
+            Entity attacker = source.getEntity();
+            if (!lightning && !(attacker instanceof Player)) return false;
             // Let vanilla apply cooldowns, crit/enchantment effects and mace success handling.
             boolean hit = super.hurtServer(level, source, damage);
             setHealth(getMaxHealth());
-            if (hit) {
-                Vec3 dir = p.getLookAngle(), eye = p.getEyePosition();
-                Vec3 point = b.bounds.clip(eye, eye.add(dir.scale(6))).orElse(b.bounds.getCenter());
-                JsonObject m = new JsonObject(); m.addProperty("t", "vehHit"); m.addProperty("id", b.vehicle); m.addProperty("dmg", damage);
-                m.addProperty("x", point.x); m.addProperty("y", point.y); m.addProperty("z", point.z);
-                m.addProperty("dx", dir.x); m.addProperty("dy", dir.y); m.addProperty("dz", dir.z); Bridge.send(m);
+            if (!hit) return false;
+            Vec3 dir, point;
+            if (lightning) {
+                dir = new Vec3(0, -1, 0);
+                point = new Vec3(b.bounds.getCenter().x, b.bounds.maxY, b.bounds.getCenter().z);
+            } else {
+                Entity direct = source.getDirectEntity();
+                if (direct != null && direct != attacker) {
+                    // arrows, tridents: along their flight, where they are
+                    Vec3 v = direct.getDeltaMovement();
+                    dir = v.lengthSqr() > 1e-6 ? v.normalize() : direct.getLookAngle();
+                    point = direct.position();
+                } else {
+                    Player p = (Player) attacker;
+                    dir = p.getLookAngle();
+                    Vec3 eye = p.getEyePosition();
+                    point = b.bounds.clip(eye, eye.add(dir.scale(6))).orElse(b.bounds.getCenter());
+                }
             }
-            return hit;
+            lastHit = point;
+            JsonObject m = new JsonObject(); m.addProperty("t", "vehHit"); m.addProperty("id", b.vehicle); m.addProperty("dmg", damage);
+            m.addProperty("x", point.x); m.addProperty("y", point.y); m.addProperty("z", point.z);
+            m.addProperty("dx", dir.x); m.addProperty("dy", dir.y); m.addProperty("dz", dir.z);
+            // enchantments that act on the car itself (damage ones are already in dmg)
+            ItemStack weapon = source.getWeaponItem();
+            if (weapon != null && !weapon.isEmpty()) {
+                var enchants = level.registryAccess().lookupOrThrow(Registries.ENCHANTMENT);
+                int kb = net.minecraft.world.item.enchantment.EnchantmentHelper.getItemEnchantmentLevel(enchants.getOrThrow(net.minecraft.world.item.enchantment.Enchantments.KNOCKBACK), weapon)
+                    + net.minecraft.world.item.enchantment.EnchantmentHelper.getItemEnchantmentLevel(enchants.getOrThrow(net.minecraft.world.item.enchantment.Enchantments.PUNCH), weapon);
+                if (attacker instanceof Player p && p.isSprinting() && source.getDirectEntity() == p) kb++;
+                if (kb > 0) m.addProperty("kb", kb);
+                int fire = net.minecraft.world.item.enchantment.EnchantmentHelper.getItemEnchantmentLevel(enchants.getOrThrow(net.minecraft.world.item.enchantment.Enchantments.FIRE_ASPECT), weapon);
+                if (fire > 0 && source.getDirectEntity() == attacker) m.addProperty("fire", fire);
+            }
+            if (source.getDirectEntity() != null && source.getDirectEntity() != attacker && source.getDirectEntity().isOnFire()) m.addProperty("fire", 1);
+            if (source.is(net.minecraft.tags.DamageTypeTags.IS_FIRE)) m.addProperty("fire", 1);
+            if (lightning) { m.addProperty("lightning", true); m.addProperty("fire", 2); }
+            Bridge.send(m);
+            return true;
         }
+
         @Override protected InteractionResult mobInteract(Player player, InteractionHand hand) {
             Box b = boxes.get(getEntityData().get(KEY));
             if (b == null) return InteractionResult.PASS;

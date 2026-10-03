@@ -4,7 +4,7 @@ local M={}
 local distance=-1
 local ttl=0
 local nativeEvent,wrappedEvent
-function M.setDistance(d) distance=d ttl=0.4 end
+function M.setDistance(d) distance=d ttl=1.5 end
 function M.updateGFX(dt) ttl=ttl-dt end
 function M.onExtensionLoaded()
   nativeEvent=input.event
