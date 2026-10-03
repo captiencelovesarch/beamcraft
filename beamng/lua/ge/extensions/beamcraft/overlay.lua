@@ -40,7 +40,12 @@ local tiles = {}   -- [ty * 4096 + tx] = { tex =, id =, x =, y = }
 
 local white = 0xFFFFFFFF
 
-local function clearTiles() tiles = {} end
+-- Each grid cell keeps one texture handle for good and re-points it at each new
+-- file: creating a handle per tile left hundreds of finalizers for Lua's garbage
+-- collector, which released them all at once in 50-80 ms hitches.
+local function clearTiles()
+  for _, tile in pairs(tiles) do tile.shown = false end
+end
 M.clear = clearTiles
 
 local function close()
@@ -94,17 +99,23 @@ local function applyFrame(msg)
       if tx then
         tx, ty = tonumber(tx), tonumber(ty)
         local key = ty * 4096 + tx
+        local tile = tiles[key]
         if name == '-' then
-          tiles[key] = nil
+          if tile then tile.shown = false end
         else
-          local tex = im.ImTextureHandler(DIR .. name)
-          local size = tex:getSize()
+          if not tile then
+            tile = { tex = im.ImTextureHandler(DIR .. name), x = tx, y = ty }
+            tiles[key] = tile
+          else
+            tile.tex:setID(DIR .. name)
+          end
+          local size = tile.tex:getSize()
           if size and size.x > 0 then
-            tiles[key] = { tex = tex, id = tex:getID(), x = tx, y = ty, w = size.x, h = size.y }
+            tile.id, tile.w, tile.h, tile.shown = tile.tex:getID(), size.x, size.y, true
             M.tilesLoaded = M.tilesLoaded + 1
           else
             -- the file is gone (we stalled longer than Minecraft keeps them)
-            tiles[key] = nil
+            tile.shown = false
             okAll = false
           end
         end
@@ -118,7 +129,7 @@ end
 function M.update(dt, enabled)
   if not enabled then
     if sock then close() end
-    if next(tiles) then clearTiles() end
+    clearTiles()
     return
   end
   if not sock then
@@ -168,7 +179,7 @@ end
 
 -- every BeamNG frame, after everything else
 function M.draw()
-  if grid.w <= 0 or not next(tiles) then return end
+  if grid.w <= 0 then return end
   local vp = im.GetMainViewport()
   if not vp then return end
   local sx, sy = vp.Size.x / grid.w, vp.Size.y / grid.h
@@ -178,6 +189,7 @@ function M.draw()
   local p0, p1 = im.ImVec2(0, 0), im.ImVec2(0, 0)
   local uv0, uv1 = im.ImVec2(0, 0), im.ImVec2(1, 1)
   for _, tile in pairs(tiles) do
+    if tile.shown then
     -- each texture has a 1 px apron of its neighbours: draw only the inside
     local x, y = tile.x * t, tile.y * t
     p0.x, p0.y = ox + x * sx, oy + y * sy
@@ -185,6 +197,7 @@ function M.draw()
     uv0.x, uv0.y = 1 / tile.w, 1 / tile.h
     uv1.x, uv1.y = (tile.w - 1) / tile.w, (tile.h - 1) / tile.h
     im.ImDrawList_AddImage(dl, tile.id, p0, p1, uv0, uv1, white)
+    end
   end
 end
 

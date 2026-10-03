@@ -169,11 +169,17 @@ local pos = obj:getPosition()
 for _, n in pairs(v.data.nodes) do
   local p = pos + obj:getNodePosition(n.cid) local d = p - c local dist = d:length()
   if dist < r * 5 then
-    local dv = math.min(30, 3.2 * r * r / (1 + dist * dist))
+    local dv = math.min(70, 12 * r * r / (1 + dist * dist))
     local dir = dist > 0.01 and (d / dist) or vec3(0, 0, 1)
     dir = (dir + vec3(0, 0, 0.35)):normalized()
     obj:applyForceVectorTime(n.cid, dir * (obj:getNodeMass(n.cid) * dv / 0.04), 0.04)
   end
+end
+-- close to the blast the car comes apart
+local tear = r * 0.45
+for _, b in pairs(v.data.beams) do
+  local p1 = pos + obj:getNodePosition(b.id1) local p2 = pos + obj:getNodePosition(b.id2)
+  if (p1 - c):length() < tear and (p2 - c):length() < tear * 1.4 then obj:breakBeam(b.cid) end
 end
 ]]
 

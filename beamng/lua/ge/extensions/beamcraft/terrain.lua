@@ -32,10 +32,11 @@ local origin = vec3()
 
 local function colKey(i, k) return (i + 1048576) * 2097152 + (k + 1048576) end
 
-function M.reset() cache = {} end
+function M.reset() cache = {} M.incomplete = true end
 
 -- forget columns over a changed block so a removed block can't leave ghost collision
 function M.invalidateBlock(x, y, z)
+  M.incomplete = true
   local r = M.res
   for i = floor(x / r) - 1, floor((x + 1) / r) do
     for k = floor(z / r) - 1, floor((z + 1) / r) do
@@ -46,6 +47,7 @@ end
 
 function M.invalidateAll()
   for key, c in pairs(cache) do c.at = -1e9 end
+  M.incomplete = true
 end
 
 -- feetX/Y/Z in Minecraft coordinates. Returns a message table or nil.
@@ -69,7 +71,10 @@ local function sample(feetX, feetY, feetZ, radius, above, reach)
         local c = cache[key]
         local delta = (di * di + dk * dk) * r * r <= M.nearRadius * M.nearRadius and M.resampleDelta or M.farResampleDelta
         if not c or math.abs(c.at - feetY) > delta then
-          if rays >= M.maxRaysPerFrame or (rays > 0 and timer:stop() >= M.sampleBudgetMs) then goto continue end
+          if rays >= M.maxRaysPerFrame or (rays > 0 and timer:stop() >= M.sampleBudgetMs) then
+            M.incomplete = true
+            goto continue
+          end
           rays = rays + 1
           local cx, cz = (i + 0.5) * r, (k + 0.5) * r
           local bx, by = cx, -cz
@@ -95,7 +100,14 @@ local function sample(feetX, feetY, feetZ, radius, above, reach)
   return { t = 'ter', r = r, c = list }
 end
 
+-- Steve's sweep walks ~2500 cached columns: skip it while he hasn't moved a column
+-- (or 0.2 m up/down) and the last sweep finished (it cost 2.4 ms every frame)
+local last = {}
 function M.update(x,y,z)
+  local ci, ck = floor(x / M.res), floor(z / M.res)
+  if not M.incomplete and last.ci == ci and last.ck == ck and last.y and math.abs(last.y - y) < 0.2 then return nil end
+  M.incomplete = false
+  last.ci, last.ck, last.y = ci, ck, y
   if M.withoutBlocks then return M.withoutBlocks(function() return sample(x,y,z) end) end
   return sample(x,y,z)
 end

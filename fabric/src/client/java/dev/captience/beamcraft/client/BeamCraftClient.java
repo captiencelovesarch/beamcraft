@@ -102,6 +102,9 @@ public class BeamCraftClient implements ClientModInitializer {
 	private String lastHud = "";
 	private boolean awaitTerrain;
 	private double[] enterTarget;
+	/** Where you last entered BeamCraft: your spawn point (the world's is out in the void). */
+	private double[] spawnPoint;
+	private LocalPlayer lastPlayer;
 	private int awaitTicks;
 	private boolean guiSent;
 	private Path iconsDir;
@@ -346,10 +349,31 @@ public class BeamCraftClient implements ClientModInitializer {
 		awaitTerrain = true;
 		awaitTicks = 0;
 		enterTarget = new double[] {x, y, z, yaw};
+		spawnPoint = enterTarget.clone();
 		p.setNoGravity(true);
 		p.setDeltaMovement(0, 0, 0);
 		teleport(mc, p, x, y, z, yaw);
 		LOG.info("Entered BeamCraft at {} {} {}", x, y, z);
+	}
+
+	/**
+	 * Respawning gives a brand-new LocalPlayer at the world spawn, which is out in the
+	 * empty void here: put Steve back at his BeamCraft spawn and hold him there until
+	 * the ground under him is known, like entering.
+	 */
+	private void checkRespawn(Minecraft mc) {
+		LocalPlayer p = mc.player;
+		if (p != null && lastPlayer != null && p != lastPlayer && controlling && spawnPoint != null) {
+			double[] t = spawnPoint;
+			awaitTerrain = true;
+			awaitTicks = 0;
+			enterTarget = t.clone();
+			p.setNoGravity(true);
+			p.setDeltaMovement(0, 0, 0);
+			teleport(mc, p, t[0], t[1], t[2], (float) t[3]);
+			LOG.info("Respawned at the BeamCraft spawn {} {} {}", t[0], t[1], t[2]);
+		}
+		if (p != null) lastPlayer = p;
 	}
 
 	private void onInput(Minecraft mc, JsonObject m) {
@@ -504,6 +528,7 @@ public class BeamCraftClient implements ClientModInitializer {
 
 	private void endTick(Minecraft mc) {
 		manageWorld(mc);
+		checkRespawn(mc);
 		if (!Bridge.isConnected()) return;
 		manageAtlas(mc);
 		manageGui(mc);

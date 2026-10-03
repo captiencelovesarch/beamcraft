@@ -330,6 +330,7 @@ function M.enter()
   local mcYaw = coords.bngLookToMc(yaw, 0)
   terrain.reset()
   prevSnap = nil
+  M.inCar = false
   releaseInput()
   net.send({ t = 'enter', x = mx, y = my, z = mz, yaw = mcYaw })
   -- prime the camera where Steve will appear, so there is no flash
@@ -423,7 +424,11 @@ handlers.vehHit = function(m)
 end
 handlers.vehUse = function(m)
   local veh = scenetree.findObjectById(m.id)
-  if active and veh and veh:getJBeamFilename() ~= 'unicycle' then M.exit() be:enterVehicle(0, veh) end
+  if active and veh and veh:getJBeamFilename() ~= 'unicycle' then
+    M.exit()
+    be:enterVehicle(0, veh)
+    M.inCar = true -- Steve got in: don't leave him standing outside
+  end
 end
 handlers.boom = function(m) vehicles.explode(m.x, m.y, m.z, m.r or 4, now) end
 
@@ -550,7 +555,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   local pose = poseNow()
   -- Steve stays visible standing where you left him while you drive
-  player.visibleThird = ready and pose ~= nil and (M.thirdPerson or not active)
+  player.visibleThird = ready and pose ~= nil and not M.inCar and (M.thirdPerson or not active)
   player.visibleFirst = false
   player.updateThird(pose, ctx)
   entities.showOwn = player.visibleThird
