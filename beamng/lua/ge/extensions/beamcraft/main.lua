@@ -413,6 +413,30 @@ handlers.ents = function(m) entities.snapshot(m, now, ctx) end
 handlers.itemModel = function(m) items.define(m) end
 handlers.particles = function(m) particles.snapshot(m, now) end
 handlers.mobModel = function(m) entities.defineModel(m) end
+
+-- a Minecraft sound BeamNG should play (e.g. a mob your car hit, far from Steve)
+local sounds = {}
+handlers.sound = function(m)
+  local id = Engine.Audio.createSource('AudioDefault3D', m.f)
+  local src = id and scenetree.findObjectById(id)
+  if not src then return end
+  local mat = MatrixF(true)
+  mat:setColumn(3, vec3(coords.mcToBng(m.x, m.y, m.z)))
+  src:setTransform(mat)
+  if src.setVolume then src:setVolume(math.min(1, m.v or 1)) end
+  if src.setPitch then src:setPitch(m.p or 1) end
+  src:play(-1)
+  sounds[#sounds + 1] = { src = src, at = now }
+end
+local function reapSounds()
+  for i = #sounds, 1, -1 do
+    local s = sounds[i]
+    if now - s.at > 6 then
+      pcall(function() s.src:delete() end)
+      table.remove(sounds, i)
+    end
+  end
+end
 -- Minecraft wants to spawn a mob here: tell it where the ground is
 handlers.probe = function(m)
   local ter = terrain.around(m.x, m.y, m.z, 1.5, 24, 64)
@@ -480,6 +504,7 @@ world.onCollisionReloaded = function() terrain.invalidateAll() end
 
 local inputTimer = 0
 local mobGroundTimer = 0
+local camTimer = 0
 local obstacleTimer = 0
 
 local function drawTarget()
@@ -564,20 +589,29 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   if net.isConnected() and ready and pose then
     -- ground under the mobs, so they walk on BeamNG's world too (also while you
-    -- drive). Mobs far below Steve have fallen into the void: sampling from there
-    -- would report some lower layer as "the ground" for everyone.
+    -- drive). Rays start 4 m above a mob so one that has sunk into the ground still
+    -- finds the real surface (Minecraft then lifts it back on top).
     mobGroundTimer = mobGroundTimer + dtReal
     if mobGroundTimer > 0.2 then
       mobGroundTimer = 0
       for _, feet in ipairs(entities.mobFeet()) do
-        if feet[2] > pose.y - 8 then
-          local mt = terrain.around(feet[1], feet[2], feet[3], 7)
-          if mt then net.send(mt) end
-        end
+        local mt = terrain.around(feet[1], feet[2], feet[3], 7, 4, 80)
+        if mt then net.send(mt) end
       end
     end
     -- cars hitting mobs
     for _, hit in ipairs(vehicles.checkMobHits(now, entities.mobList())) do net.send(hit) end
+    -- away from Steve, Minecraft hears from BeamNG's camera
+    camTimer = camTimer + dtReal
+    if not active and camTimer > 0.033 then
+      camTimer = 0
+      local cp, cf, cu = core_camera.getPosition(), core_camera.getForward(), core_camera.getUp()
+      local x, y, z = coords.bngToMc(cp.x, cp.y, cp.z)
+      local fx, fy, fz = coords.bngToMc(cf.x, cf.y, cf.z)
+      local ux, uy, uz = coords.bngToMc(cu.x, cu.y, cu.z)
+      net.send({ t = 'cam', x = x, y = y, z = z, fx = fx, fy = fy, fz = fz, ux = ux, uy = uy, uz = uz })
+    end
+    reapSounds()
   end
 
   if active and net.isConnected() and pose then

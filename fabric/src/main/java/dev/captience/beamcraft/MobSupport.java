@@ -62,17 +62,7 @@ public final class MobSupport {
 		}
 	}
 
-	// mobs we took gravity away from while the ground under them is unknown
-	private static final java.util.Set<Mob> HELD = java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
-
 	private static void holdUnscanned(ServerLevel level, ServerPlayer player) {
-		for (var it = HELD.iterator(); it.hasNext();) {
-			Mob mob = it.next();
-			if (mob.isRemoved() || TerrainColumns.hasGroundAt(mob.getX(), mob.getZ())) {
-				mob.setNoGravity(false);
-				it.remove();
-			}
-		}
 		List<Mob> mobs = level.getEntitiesOfClass(Mob.class, player.getBoundingBox().inflate(128));
 		for (Mob mob : mobs) {
 			if (mob instanceof VehicleTargets.Target) continue;
@@ -81,18 +71,36 @@ public final class MobSupport {
 				mob.discard();
 				continue;
 			}
-			if (HELD.contains(mob) || mob.isNoGravity() || mob.isPassenger() || !(mob.getNavigation() instanceof GroundPathNavigation)) continue;
-			if (mob.isInWater() || TerrainColumns.hasGroundAt(mob.getX(), mob.getZ())) continue;
-			// nothing known under it yet: float in place until BeamNG has sampled there
-			// (zeroing velocity after the tick was not enough: gravity still sank it
-			// 0.08 m a tick, right through the ground once that arrived)
-			mob.setNoGravity(true);
-			Vec3 v = mob.getDeltaMovement();
-			mob.setDeltaMovement(0, Math.max(0, v.y), 0);
-			mob.fallDistance = 0;
-			HELD.add(mob);
+			if (mob.isNoGravity() || mob.isPassenger() || !(mob.getNavigation() instanceof GroundPathNavigation)) continue;
+			if (mob.isInWater()) continue;
+			Float top = TerrainColumns.heightAt(mob.getX(), mob.getZ());
+			if (top == null) {
+				// nothing known under it yet: undo this tick's fall until BeamNG has
+				// sampled there. (Not the NoGravity flag: Minecraft saves that, and a
+				// restart left mobs floating inside the ground for good.)
+				Vec3 v = mob.getDeltaMovement();
+				if (mob.getY() < mob.yo) mob.setPos(mob.getX(), mob.yo, mob.getZ());
+				mob.setDeltaMovement(v.x * 0.5, Math.max(0, v.y), v.z * 0.5);
+				mob.fallDistance = 0;
+				continue;
+			}
+			// caught inside BeamNG's ground (it arrived under a mob that had already
+			// dropped a little): collision never pushes out, so it would sink through.
+			// Put it back on top.
+			if (top > TerrainColumns.NONE + 1 && mob.getY() < top - 0.01 && mob.getY() > top - 4) {
+				mob.setPos(mob.getX(), top + 0.001, mob.getZ());
+				Vec3 v = mob.getDeltaMovement();
+				mob.setDeltaMovement(v.x, Math.max(0, v.y), v.z);
+				mob.fallDistance = 0;
+			}
 		}
 	}
+
+	/** Plays a Minecraft sound event in BeamNG at a position (set by the client). */
+	public interface SoundSink {
+		void play(net.minecraft.resources.Identifier event, double x, double y, double z, float volume, float pitch);
+	}
+	public static volatile SoundSink soundSink;
 
 	/** A BeamNG car hit an entity: vehicle damage and a launch, like Steve gets. */
 	public static void carHit(MinecraftServer server, int id, float dmg, double vx, double vy, double vz) {
@@ -103,9 +111,21 @@ public final class MobSupport {
 				var type = level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.DAMAGE_TYPE)
 					.getOrThrow(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.DAMAGE_TYPE,
 						net.minecraft.resources.Identifier.fromNamespaceAndPath("beamcraft", "vehicle")));
-				le.hurtServer(level, new net.minecraft.world.damagesource.DamageSource(type), dmg);
+				var source = new net.minecraft.world.damagesource.DamageSource(type);
+				// vanilla only plays the hurt sound to players within 16 blocks of the
+				// mob, which Steve usually isn't while you drive: BeamNG plays it instead
+				boolean silent = le.isSilent();
+				le.setSilent(true);
+				boolean hit = le.hurtServer(level, source, dmg);
+				le.setSilent(silent);
 				le.setDeltaMovement(le.getDeltaMovement().add(vx / 20.0, vy / 20.0, vz / 20.0));
 				le.hurtMarked = true;
+				if (hit && !silent && soundSink != null) {
+					var acc = (dev.captience.beamcraft.mixin.LivingEntitySounds) le;
+					var ev = le.isDeadOrDying() ? acc.beamcraft$deathSound() : acc.beamcraft$hurtSound(source);
+					if (ev != null) soundSink.play(ev.location(), le.getX(), le.getY() + le.getBbHeight() / 2, le.getZ(),
+						acc.beamcraft$volume(), le.getVoicePitch());
+				}
 				return;
 			}
 		});

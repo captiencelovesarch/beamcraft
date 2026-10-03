@@ -23,7 +23,8 @@
 		"TextureBindingAccessor",
 		"LivingEntityRendererAccess",
 		"AgeableMobRendererAccess",
-		"ModelPartAccess"
+		"ModelPartAccess",
+		"SoundEngineMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

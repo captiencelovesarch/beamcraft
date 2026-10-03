@@ -73,6 +73,51 @@ public class BeamCraftClient implements ClientModInitializer {
 	private static volatile boolean controlling;
 	private static BeamCraftClient instance;
 	private static volatile int targetFps = 144;
+	private static volatile com.mojang.blaze3d.audio.ListenerTransform listener;
+	private static volatile long listenerAt;
+
+	/** BeamNG's camera as Minecraft's sound listener, while it keeps sending it. */
+	public static com.mojang.blaze3d.audio.ListenerTransform beamngListener() {
+		if (listener == null || System.nanoTime() - listenerAt > 500_000_000L) return null;
+		return listener;
+	}
+
+	/** A Minecraft sound event as a file BeamNG can play, then tell BeamNG where. */
+	private void playInBeamNG(Identifier event, double x, double y, double z, float volume, float pitch) {
+		Minecraft mc = Minecraft.getInstance();
+		mc.execute(() -> {
+			if (userPath == null) return;
+			var events = mc.getSoundManager().getSoundEvent(event);
+			if (events == null) return;
+			var sound = events.getSound(net.minecraft.util.RandomSource.create());
+			if (sound == null || sound == net.minecraft.client.sounds.SoundManager.EMPTY_SOUND) return;
+			Identifier file = sound.getPath();
+			Path out = userPath.resolve("beamcraft/sounds").resolve(file.getNamespace()).resolve(file.getPath());
+			try {
+				if (!java.nio.file.Files.exists(out)) {
+					var res = mc.getResourceManager().getResource(file);
+					if (res.isEmpty()) return;
+					java.nio.file.Files.createDirectories(out.getParent());
+					try (var in = res.get().open()) {
+						java.nio.file.Files.copy(in, out, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+					}
+				}
+			} catch (java.io.IOException e) {
+				LOG.warn("Could not export sound {}", file, e);
+				return;
+			}
+			var r = net.minecraft.util.RandomSource.create();
+			JsonObject msg = new JsonObject();
+			msg.addProperty("t", "sound");
+			msg.addProperty("f", "/beamcraft/sounds/" + file.getNamespace() + "/" + file.getPath());
+			msg.addProperty("x", x);
+			msg.addProperty("y", y);
+			msg.addProperty("z", z);
+			msg.addProperty("v", volume * sound.getVolume().sample(r));
+			msg.addProperty("p", pitch * sound.getPitch().sample(r));
+			Bridge.send(msg);
+		});
+	}
 	private PlayerModel widePoseModel;
 	private PlayerModel slimPoseModel;
 	private PlayerCapeModel capePoseModel;
@@ -121,6 +166,7 @@ public class BeamCraftClient implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
 		instance = this;
+		dev.captience.beamcraft.MobSupport.soundSink = this::playInBeamNG;
 		LOG.info("BeamCraft client starting (headless={})", HEADLESS);
 		net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry.register(dev.captience.beamcraft.VehicleTargets.TYPE, ctx -> new net.minecraft.client.renderer.entity.EntityRenderer<dev.captience.beamcraft.VehicleTargets.Target, net.minecraft.client.renderer.entity.state.EntityRenderState>(ctx) {
 			public net.minecraft.client.renderer.entity.state.EntityRenderState createRenderState() { return new net.minecraft.client.renderer.entity.state.EntityRenderState(); }
@@ -292,6 +338,14 @@ public class BeamCraftClient implements ClientModInitializer {
 			case "time" -> setTimeOfDay(mc, num(m, "tod"));
 			case "oin" -> OverlayServer.INPUT.add(m.getAsJsonObject("e")); // overlay input relayed by BeamNG's Lua
 			case "hurt" -> onHurt(mc, m);
+			case "cam" -> {
+				// BeamNG's camera (MC coords) while you aren't Steve: Minecraft listens from there
+				listener = new com.mojang.blaze3d.audio.ListenerTransform(
+					new net.minecraft.world.phys.Vec3(num(m, "x"), num(m, "y"), num(m, "z")),
+					new net.minecraft.world.phys.Vec3(num(m, "fx"), num(m, "fy"), num(m, "fz")),
+					new net.minecraft.world.phys.Vec3(num(m, "ux"), num(m, "uy"), num(m, "uz")));
+				listenerAt = System.nanoTime();
+			}
 			case "mobHit" -> {
 				if (mc.getSingleplayerServer() != null) dev.captience.beamcraft.MobSupport.carHit(mc.getSingleplayerServer(),
 					m.get("id").getAsInt(), (float) num(m, "dmg"), num(m, "vx"), num(m, "vy"), num(m, "vz"));
@@ -340,7 +394,9 @@ public class BeamCraftClient implements ClientModInitializer {
 		if (p == null) return;
 		double x = m.get("x").getAsDouble(), y = m.get("y").getAsDouble(), z = m.get("z").getAsDouble();
 		float yaw = m.has("yaw") ? m.get("yaw").getAsFloat() : p.getYRot();
-		TerrainColumns.clear();
+		// keep the ground already known: BeamNG re-sends every column around Steve now,
+		// and wiping it dropped every mob standing on it a little into the floor, from
+		// where they sank through
 		TerrainColumns.setEnabled(true);
 		inYaw = yaw;
 		inPitch = 0;

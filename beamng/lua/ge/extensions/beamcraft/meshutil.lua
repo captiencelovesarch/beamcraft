@@ -181,6 +181,18 @@ function M.blockMeshes(quads, s, matFor)
   return list
 end
 
+-- Every object made here is a visual (Steve, mobs, items, particles): never part of
+-- BeamNG's static collision. A collision rebuild bakes whatever has collision into
+-- solid walls where it stood - a dropped feather stopped a car dead. World code
+-- switches these off around rebuilds and its own raycasts (M.eachVisual).
+M.visuals = setmetatable({}, { __mode = 'k' })
+function M.eachVisual(fn)
+  for obj in pairs(M.visuals) do
+    local ok = pcall(fn, obj)
+    if not ok then M.visuals[obj] = nil end
+  end
+end
+
 local counter = 0
 function M.newObject(prefix, meshes)
   counter = counter + 1
@@ -192,11 +204,15 @@ function M.newObject(prefix, meshes)
   -- one mesh group only: an empty extra group ({ meshes, {} }) makes createMesh fail
   -- ("verts must be a table"), and a group holding an empty mesh crashes BeamNG
   if meshes and #meshes > 0 then obj:createMesh({ meshes }) end
+  M.visuals[obj] = true
   return obj
 end
 
 function M.deleteObject(obj)
-  if obj then pcall(function() obj:delete() end) end
+  if obj then
+    M.visuals[obj] = nil
+    pcall(function() obj:delete() end)
+  end
 end
 
 ------------------------------------------------------------------------------

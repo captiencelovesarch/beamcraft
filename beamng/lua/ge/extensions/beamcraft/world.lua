@@ -192,8 +192,12 @@ function M.rebuildCollisionNow()
   sinceRebuild = 0
   dirtyCentres = {}
   for _,sec in pairs(sections) do if sec.objs[1] then sec.objs[1]:enableCollision() sec.disabled=nil end end
+  -- visuals (mobs, items, Steve, particles) must not be baked in as walls
+  local visuals = {}
+  mu.eachVisual(function(obj) obj:disableCollision() visuals[#visuals + 1] = obj end)
   local ct = hptimer()
   be:reloadCollision()
+  for _, obj in ipairs(visuals) do pcall(function() obj:enableCollision() end) end
   M.lastCollisionMs = ct:stop()
   M.collisionReloads = M.collisionReloads + 1
   if M.onCollisionReloaded then M.onCollisionReloaded() end
@@ -398,6 +402,8 @@ function M.withoutCollision(fn)
   for _,sec in pairs(sections) do
     if sec.objs[1] and not sec.disabled then sec.objs[1]:disableCollision() enabled[#enabled+1]=sec.objs[1] end
   end
+  -- mobs, items and Steve aren't ground either
+  mu.eachVisual(function(obj) obj:disableCollision() enabled[#enabled+1]=obj end)
   local ok,result=pcall(fn)
   for _,obj in ipairs(enabled) do obj:enableCollision() end
   if not ok then error(result) end
