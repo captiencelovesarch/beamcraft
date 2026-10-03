@@ -46,7 +46,20 @@ public final class MobSupport {
 		if (player == null || player.level().dimension() != Level.OVERWORLD) return;
 		ServerLevel level = player.level();
 		holdUnscanned(level, player);
+		if (Boolean.getBoolean("beamcraft.mobDebug") && timer % 100 == 0) debug(level, player);
 		if (++timer % 20 == 0) spawnTick(level, player);
+	}
+
+	private static void debug(ServerLevel level, ServerPlayer player) {
+		for (Mob mob : level.getEntitiesOfClass(Mob.class, player.getBoundingBox().inflate(64))) {
+			var nav = mob.getNavigation();
+			var path = nav.getPath();
+			BeamCraft.LOG.info("mob {} at {} {} {} ground={} known={} target={} path={} done={} below={}",
+				mob.getType().getDescriptionId(), String.format("%.1f", mob.getX()), String.format("%.2f", mob.getY()), String.format("%.1f", mob.getZ()),
+				mob.onGround(), TerrainColumns.heightAt(mob.getX(), mob.getZ()), mob.getTarget() == null ? "-" : mob.getTarget().getName().getString(),
+				path == null ? "null" : path.getNodeCount() + "@" + path.getNextNodeIndex(), nav.isDone(),
+				net.minecraft.world.level.pathfinder.WalkNodeEvaluator.getPathTypeStatic(mob, mob.blockPosition().below()));
+		}
 	}
 
 	private static void holdUnscanned(ServerLevel level, ServerPlayer player) {

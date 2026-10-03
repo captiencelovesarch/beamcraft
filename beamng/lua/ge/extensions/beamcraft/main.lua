@@ -512,6 +512,8 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     -- a (re)started Minecraft numbers its mob models afresh
     entities.clear()
     entities.forgetModels()
+    -- a fresh Minecraft knows no ground yet: send every column again
+    terrain.reset()
     sendHello()
   end, function()
     ready = false
@@ -551,6 +553,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   player.visibleThird = ready and pose ~= nil and (M.thirdPerson or not active)
   player.visibleFirst = false
   player.updateThird(pose, ctx)
+  entities.showOwn = player.visibleThird
   entities.update(now)
   particles.update(now)
 
@@ -564,7 +567,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     if mobGroundTimer > 0.2 then
       mobGroundTimer = 0
       for _, feet in ipairs(entities.mobFeet()) do
-        local mt = terrain.around(feet[1], feet[2], feet[3], 4)
+        local mt = terrain.around(feet[1], feet[2], feet[3], 7)
         if mt then net.send(mt) end
       end
     end

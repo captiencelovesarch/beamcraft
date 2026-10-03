@@ -78,7 +78,10 @@ local KIND = { [0] = 'solid', [1] = 'cutout', [2] = 'translucent' }
 
 local function ensureMaterial(page, layer, ground)
   local name = materialName(page, layer, ground)
-  return mu.textureMaterial(name, string.format('%s/%s_%d.png', atlas.dir, atlas.hash, page), KIND[layer] or 'solid', ground)
+  -- matte: Minecraft blocks have no specular; BeamNG's default gloss and sky
+  -- reflections laid a grey sheen over every texture
+  return mu.textureMaterial(name, string.format('%s/%s_%d.color.png', atlas.dir, atlas.hash, page), KIND[layer] or 'solid', ground,
+    nil, true)
 end
 
 local function flushMaterials() mu.flushMaterials() end

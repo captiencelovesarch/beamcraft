@@ -16,7 +16,7 @@ function M.iconPath(itemId)
   if not M.iconsDir or not itemId then return nil end
   local ns, path = itemId:match('^([^:]+):(.+)$')
   if not ns then ns, path = 'minecraft', itemId end
-  return string.format('%s/%s/%s.png', M.iconsDir, ns, path)
+  return string.format('%s/%s/%s.color.png', M.iconsDir, ns, path)
 end
 
 function M.drawStatus(lines)

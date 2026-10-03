@@ -790,6 +790,16 @@ public class BeamCraftClient implements ClientModInitializer {
 				.append(r4(e.getYRot())).append(',').append(r4(e.getBbWidth())).append(',').append(r4(e.getBbHeight())).append(',')
 				.append(extra).append(']');
 		}
+		// what Steve wears beyond skin, armour and cape (BeamNG builds those): the elytra
+		String worn = EntityModelExport.pose(mc, userPath == null ? null : userPath.resolve("beamcraft/render"), p,
+			tex -> tex.contains("wings"));
+		if (worn != null) {
+			if (n++ > 0) sb.append(',');
+			sb.append('[').append(p.getId()).append(",\"w\",")
+				.append(r4(p.getX())).append(',').append(r4(p.getY())).append(',').append(r4(p.getZ())).append(',')
+				.append(r4(p.getYRot())).append(',').append(r4(p.getBbWidth())).append(',').append(r4(p.getBbHeight())).append(',')
+				.append(worn).append(']');
+		}
 		if (n == 0 && !entsWereSent) return;
 		entsWereSent = n > 0;
 		Bridge.sendLine(sb.append("]}").toString());

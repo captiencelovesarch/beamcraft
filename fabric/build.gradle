@@ -23,6 +23,7 @@ loom {
 			vmArg "-Xmx3G"
 			vmArg "-Dbeamcraft.headless=${project.findProperty('headless') ?: 'false'}"
 			vmArg "-Dbeamcraft.port=${project.findProperty('port') ?: '47800'}"
+			vmArg "-Dbeamcraft.mobDebug=${project.findProperty('mobDebug') ?: 'false'}"
 			runDir "run"
 		}
 	}

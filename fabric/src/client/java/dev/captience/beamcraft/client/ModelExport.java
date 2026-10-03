@@ -349,7 +349,7 @@ public final class ModelExport {
 		Files.createDirectories(dir);
 		boolean allPresent = true;
 		for (int p = 0; p < pages; p++) {
-			if (!Files.exists(dir.resolve(hash + "_" + p + ".png"))) allPresent = false;
+			if (!Files.exists(dir.resolve(hash + "_" + p + ".color.png"))) allPresent = false;
 		}
 		if (allPresent) {
 			LOG.info("Atlas {} already on disk", hash);
@@ -368,7 +368,7 @@ public final class ModelExport {
 		for (int p = 0; p < pages; p++) {
 			Path tmp = dir.resolve(hash + "_" + p + ".png.tmp");
 			ImageIO.write(images[p], "png", tmp.toFile());
-			Files.move(tmp, dir.resolve(hash + "_" + p + ".png"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+			Files.move(tmp, dir.resolve(hash + "_" + p + ".color.png"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
 		}
 		Files.writeString(dir.resolve(hash + ".txt"), String.join("\n", tiles.keySet()), StandardCharsets.UTF_8);
 		LOG.info("Wrote {} atlas page(s) to {} in {} ms", pages, dir, (System.nanoTime() - t0) / 1_000_000);

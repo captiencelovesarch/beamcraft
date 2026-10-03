@@ -11,7 +11,9 @@ local coords = require('beamcraft/coords')
 local M = {}
 
 M.res = 0.5           -- column size in metres
-M.radius = 5.0        -- sample this far around Steve
+M.radius = 14.0       -- sample this far around Steve (mobs need ground to path over)
+M.nearRadius = 5.0    -- within this, resample on small height changes (bridges, ramps)
+M.farResampleDelta = 4.0
 M.above = 2.0         -- rays start this far above Steve's feet ...
 M.reach = 80.0        -- ... and look this far down
 M.resampleDelta = 0.75
@@ -65,7 +67,8 @@ local function sample(feetX, feetY, feetZ, radius, above, reach)
         local i, k = ci + di, ck + dk
         local key = colKey(i, k)
         local c = cache[key]
-        if not c or math.abs(c.at - feetY) > M.resampleDelta then
+        local delta = (di * di + dk * dk) * r * r <= M.nearRadius * M.nearRadius and M.resampleDelta or M.farResampleDelta
+        if not c or math.abs(c.at - feetY) > delta then
           if rays >= M.maxRaysPerFrame or (rays > 0 and timer:stop() >= M.sampleBudgetMs) then goto continue end
           rays = rays + 1
           local cx, cz = (i + 0.5) * r, (k + 0.5) * r

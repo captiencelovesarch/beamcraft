@@ -65,6 +65,11 @@ final class EntityModelExport {
 	 */
 	@SuppressWarnings({"unchecked", "rawtypes"})
 	static String pose(Minecraft mc, Path renderRoot, net.minecraft.world.entity.Entity e) {
+		return pose(mc, renderRoot, e, null);
+	}
+
+	/** keepTexture: only export layers whose texture path passes (null = all). */
+	static String pose(Minecraft mc, Path renderRoot, net.minecraft.world.entity.Entity e, java.util.function.Predicate<String> keepTexture) {
 		if (renderRoot == null) return null;
 		try {
 			EntityRenderer renderer = mc.getEntityRenderDispatcher().getRenderer(e);
@@ -81,7 +86,7 @@ final class EntityModelExport {
 					if (name.equals("submitModel") && args.length == 10) {
 						layer(mc, renderRoot, type, (net.minecraft.client.model.Model) args[0], args[1], (PoseStack) args[2],
 							(net.minecraft.client.renderer.rendertype.RenderType) args[3], (Integer) args[6],
-							(net.minecraft.client.renderer.texture.TextureAtlasSprite) args[7], sb, layers);
+							(net.minecraft.client.renderer.texture.TextureAtlasSprite) args[7], sb, layers, keepTexture);
 						return null;
 					}
 					if (method.isDefault()) return java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, args);
@@ -99,7 +104,8 @@ final class EntityModelExport {
 	@SuppressWarnings({"unchecked", "rawtypes"})
 	private static void layer(Minecraft mc, Path root, String type, net.minecraft.client.model.Model model, Object state,
 			PoseStack ps, net.minecraft.client.renderer.rendertype.RenderType renderType, int tint,
-			net.minecraft.client.renderer.texture.TextureAtlasSprite sprite, StringBuilder sb, int[] layers) throws Exception {
+			net.minecraft.client.renderer.texture.TextureAtlasSprite sprite, StringBuilder sb, int[] layers,
+			java.util.function.Predicate<String> keepTexture) throws Exception {
 		RenderAssets.Texture tex;
 		int rgb = (tint & 0xFF000000) == 0 ? -1 : (tint | 0xFF000000) == -1 ? -1 : tint & 0xFFFFFF;
 		if (sprite != null) {
@@ -118,6 +124,7 @@ final class EntityModelExport {
 			}
 		}
 		if (tex == null) return;
+		if (keepTexture != null && !keepTexture.test(tex.color())) return;
 		// Model.Simple wrappers are made per call: identify geometry by the root part
 		ModelPart rootPart = model.root();
 		Model exported = MODELS.get(rootPart);

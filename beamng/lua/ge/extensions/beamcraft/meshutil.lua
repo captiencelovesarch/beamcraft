@@ -207,7 +207,7 @@ local known, pending = {}, {}
 
 -- bumped whenever material definitions change shape, so a running game gets fresh
 -- objects instead of keeping the old ones
-M.suffix = '_r5'
+M.suffix = '_r7'
 
 function M.material(name, def)
   name = name .. M.suffix
@@ -224,7 +224,7 @@ function M.textureMaterial(name, texture, kind, ground, opacityTexture, matte)
     Stages = { { baseColorMap = texture, roughnessFactor = matte and 1 or 0.92, metallicFactor = 0 }, {}, {}, {} },
     groundType = ground or 'ROCK', materialTag0 = 'beamcraft', castShadows = true,
   }
-  if matte then def.dynamicCubemap, def.useAnisotropic = false, false end
+  if matte then def.dynamicCubemap = false end
   -- v1.5 materials take alpha from opacityMap, not from the colour map's alpha
   if kind == 'cutout' then
     def.Stages[1].opacityMap = opacityTexture or texture

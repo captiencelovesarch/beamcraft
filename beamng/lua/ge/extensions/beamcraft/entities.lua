@@ -15,6 +15,8 @@ local M = {}
 local ents = {}      -- id -> { obj, key, kind, prev={x,y,z}, cur={x,y,z}, at, seen, w, h, label }
 local stamp = 0
 local pi = math.pi
+local HIDE = -100000
+M.showOwn = false
 local models = {}    -- model key -> { parts = { quads... } }
 
 -- geometry of one Minecraft entity model (sent once per model)
@@ -75,7 +77,8 @@ function M.snapshot(msg, now, ctx)
   for _, e in ipairs(msg.l or {}) do
     local id, kind = e[1], e[2]
     local ent = ents[id]
-    local mob = kind == 'm' and type(e[9]) == 'table' and e[9].L or nil
+    -- 'w' = what Steve wears (elytra), shown only while his body is (M.showOwn)
+    local mob = (kind == 'm' or kind == 'w') and type(e[9]) == 'table' and e[9].L or nil
     local orb = kind == 'x' and type(e[9]) == 'table' and e[9] or nil
     local key
     if mob then
@@ -131,7 +134,6 @@ function M.deleteEnt(ent)
   ent.obj, ent.layers = nil, nil
 end
 
-local HIDE = -100000
 local function placeParts(layer, a, x, y, z)
   local pose, prev = layer.pose or {}, layer.prev or layer.pose or {}
   for idx, obj in pairs(layer.parts) do
@@ -187,7 +189,7 @@ local function boxLines(x0, y0, z0, x1, y1, z1, color, depthTest)
     vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0),
     vec3(x0, y0, z1), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x0, y1, z1),
   }
-  for _, e in ipairs(EDGES) do debugDrawer:drawLine(c[e[1]], c[e[2]], color, not depthTest) end
+  for _, e in ipairs(EDGES) do debugDrawer:drawLine(c[e[1]], c[e[2]], color, depthTest == true) end
 end
 M.boxLines = boxLines
 
@@ -200,7 +202,11 @@ function M.update(now, camPos)
     local z = p[3] + (c[3] - p[3]) * a
     local bx, by, bz = coords.mcToBng(x, y, z)
     if ent.layers then
-      for _, layer in ipairs(ent.layers) do placeParts(layer, a, x, y, z) end
+      local show = ent.kind ~= 'w' or M.showOwn
+      for _, layer in ipairs(ent.layers) do
+        if show then placeParts(layer, a, x, y, z)
+        else for _, o in pairs(layer.parts) do mu.setXform(o, 0, 0, HIDE, mu.IDENTITY) end end
+      end
     elseif ent.obj then
       if ent.kind == 'x' then
         -- vanilla orbs always face the camera

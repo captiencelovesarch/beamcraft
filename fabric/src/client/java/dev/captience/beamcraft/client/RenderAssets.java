@@ -32,10 +32,10 @@ final class RenderAssets {
             image.setRGB(x,y,c); mask.setRGB(x,y,0xff000000 | (a<<16) | (a<<8) | a);
         }
         String name = id.getNamespace()+"/"+id.getPath()+"_"+Integer.toHexString(tint);
-        Path file = root.resolve(name+".png"), opacity = root.resolve(name+"_opacity.data.png");
+        Path file = root.resolve(name+".color.png"), opacity = root.resolve(name+"_opacity.data.png");
         Files.createDirectories(file.getParent());
         GuiExport.write(GuiExport.upscale(image,8), file); GuiExport.write(GuiExport.upscale(mask,8), opacity);
         String url = "/beamcraft/render/"+name;
-        Texture result = new Texture(url+".png",url+"_opacity.data.png"); cache.put(key,result); return result;
+        Texture result = new Texture(url+".color.png",url+"_opacity.data.png"); cache.put(key,result); return result;
     }
 }

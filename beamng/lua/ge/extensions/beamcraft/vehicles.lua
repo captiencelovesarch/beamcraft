@@ -103,7 +103,7 @@ end
 -- Falls back to the point Minecraft reported if the ray misses every node.
 local DENT = [[
 local eye = vec3(%f, %f, %f) local d = vec3(%f, %f, %f) local hp = vec3(%f, %f, %f)
-local r = %f local dv = %f
+local r = %f local dv = %f local br = %f
 local pos = obj:getPosition()
 local bestT = 1e9
 for _, n in pairs(v.data.nodes) do
@@ -114,7 +114,14 @@ for _, n in pairs(v.data.nodes) do
   local q = pos + obj:getNodePosition(n.cid) local dist = (q - hp):length()
   if dist < r then
     local w = 1 - dist / r
-    obj:applyForceVectorTime(n.cid, d * (obj:getNodeMass(n.cid) * dv * w * w / 0.03), 0.03)
+    obj:applyForceVectorTime(n.cid, d * (obj:getNodeMass(n.cid) * dv * w / 0.03), 0.03)
+  end
+end
+-- heavy blows tear the metal at the impact point
+if br > 0 then
+  for _, b in pairs(v.data.beams) do
+    local p1 = pos + obj:getNodePosition(b.id1) local p2 = pos + obj:getNodePosition(b.id2)
+    if (p1 - hp):length() < br and (p2 - hp):length() < br * 1.5 then obj:breakBeam(b.cid) end
   end
 end
 ]]
@@ -152,9 +159,11 @@ end
 -- A successful vanilla combat hit. m.dmg is Minecraft's final damage for the swing:
 -- weapon, attack cooldown, crits, Sharpness/Smite, mace fall bonus all included
 -- (fist 1, iron sword 6, netherite axe 10, a mace smash can be 30+).
-M.dentPerDamage = 1.6     -- m/s of dent speed per point of damage
-M.dentRadiusBase = 0.18   -- metres
-M.dentRadiusPerDamage = 0.03
+M.dentPerDamage = 4.5     -- m/s of dent speed per point of damage
+M.dentRadiusBase = 0.25   -- metres
+M.dentRadiusPerDamage = 0.035
+M.tearFromDamage = 20     -- hits at least this hard break beams at the impact
+M.tearRadiusPerDamage = 0.006
 function M.hit(m, now, eye)
   local veh = scenetree.findObjectById(m.id)
   if not veh or veh:getJBeamFilename() == 'unicycle' then return end
@@ -165,12 +174,13 @@ function M.hit(m, now, eye)
   local damage = math.max(0, math.min(200, m.dmg or 1))
   log('I', 'beamcraft', string.format('hit car %d for %.1f damage', m.id, damage))
   -- the whole car rocks a little; heavy hits shove it
-  local push = vec3(dx, dy, dz) * math.min(8, damage * 0.12)
+  local push = vec3(dx, dy, dz) * math.min(10, damage * 0.15)
   veh:applyClusterVelocityScaleAdd(veh:getRefNodeId(), 1, push.x, push.y, math.max(-1, push.z) + 0.1)
-  local radius = math.min(1.4, M.dentRadiusBase + damage * M.dentRadiusPerDamage)
-  local dv = math.min(90, 3 + damage * M.dentPerDamage)
+  local radius = math.min(1.8, M.dentRadiusBase + damage * M.dentRadiusPerDamage)
+  local dv = math.min(300, 6 + damage * M.dentPerDamage)
+  local tear = damage >= M.tearFromDamage and math.min(0.6, damage * M.tearRadiusPerDamage) or 0
   eye = eye or vec3(x, y, z) - vec3(dx, dy, dz) * 2
-  veh:queueLuaCommand(string.format(DENT, eye.x, eye.y, eye.z, dx, dy, dz, x, y, z, radius, dv))
+  veh:queueLuaCommand(string.format(DENT, eye.x, eye.y, eye.z, dx, dy, dz, x, y, z, radius, dv, tear))
 end
 
 function M.updateObstacles(world)

@@ -112,7 +112,7 @@ public final class GuiExport {
 			msg.add("overlays", overlays);
 			// BeamNG caches textures by path: name the file after its content
 			int[] argb = skinImg.getRGB(0, 0, skinImg.getWidth(), skinImg.getHeight(), null, 0, skinImg.getWidth());
-			String skinFile = "skin_" + Integer.toHexString(java.util.Arrays.hashCode(argb)) + ".png";
+			String skinFile = "skin_" + Integer.toHexString(java.util.Arrays.hashCode(argb)) + ".color.png";
 			write(upscale(skinImg, 4), out.resolve(skinFile));
 			msg.addProperty("skin", skinFile);
 			String maskFile = skinFile.replace(".png", "_opacity.data.png");
@@ -131,7 +131,7 @@ public final class GuiExport {
 		if (capeImg == null) capeImg = read(rm, Identifier.fromNamespaceAndPath("beamcraft", "textures/entity/captience_cape.png"));
 		if (capeImg != null && capeImg.getWidth() >= 22 && capeImg.getHeight() >= 17) {
 			int[] argb = capeImg.getRGB(0, 0, capeImg.getWidth(), capeImg.getHeight(), null, 0, capeImg.getWidth());
-			String capeFile = "cape_" + Integer.toHexString(java.util.Arrays.hashCode(argb)) + ".png";
+			String capeFile = "cape_" + Integer.toHexString(java.util.Arrays.hashCode(argb)) + ".color.png";
 			write(upscale(capeImg, 4), out.resolve(capeFile));
 			msg.addProperty("cape", capeFile);
 		}
@@ -169,7 +169,7 @@ public final class GuiExport {
 		String color = dye == null ? "default" : Integer.toHexString(dye.rgb() & 0xFFFFFF);
 		String base = (asset.getNamespace() + "_" + asset.getPath() + "_" + layerType + "_" + color)
 			.replaceAll("[^A-Za-z0-9_-]", "_");
-		Path file = dir.resolve(base + ".png");
+		Path file = dir.resolve(base + ".color.png");
 		Path mask = dir.resolve(base + "_opacity.data.png");
 		try {
 			if (!Files.isRegularFile(file) || !Files.isRegularFile(mask)) {
@@ -269,7 +269,7 @@ public final class GuiExport {
 
 	public static Path iconPath(Path iconsDir, String itemId) {
 		Identifier id = Identifier.parse(itemId);
-		return iconsDir.resolve(id.getNamespace()).resolve(id.getPath() + ".png");
+		return iconsDir.resolve(id.getNamespace()).resolve(id.getPath() + ".color.png");
 	}
 
 	/** Write the icon for an item if it isn't on disk yet. Client thread. */
