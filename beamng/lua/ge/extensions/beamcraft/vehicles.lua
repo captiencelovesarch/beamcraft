@@ -97,14 +97,26 @@ end
 -- punching cars
 ------------------------------------------------------------------------------
 
+-- A dent where your swing meets the car: the first node along the look ray (within
+-- 0.35 m of it) is the impact point, then every node within radius r of it is shoved
+-- along the swing, hardest at the centre. dv = speed change (m/s) at the centre.
+-- Falls back to the point Minecraft reported if the ray misses every node.
 local DENT = [[
-local hp = vec3(%f, %f, %f) local d = vec3(%f, %f, %f) local k = %f
-local pos = obj:getPosition() local best, bd = nil, 1e9
+local eye = vec3(%f, %f, %f) local d = vec3(%f, %f, %f) local hp = vec3(%f, %f, %f)
+local r = %f local dv = %f
+local pos = obj:getPosition()
+local bestT = 1e9
 for _, n in pairs(v.data.nodes) do
-  local q = pos + obj:getNodePosition(n.cid) local dd = (q - hp):squaredLength()
-  if dd < bd then bd, best = dd, n.cid end
+  local q = pos + obj:getNodePosition(n.cid) local rel = q - eye local t = rel:dot(d)
+  if t > 0 and t < 7 and t < bestT and (rel - d * t):length() < 0.35 then bestT, hp = t, q end
 end
-if best and bd < 1.5 then obj:applyForceVectorTime(best, d * (obj:getNodeMass(best) * k), 0.05) end
+for _, n in pairs(v.data.nodes) do
+  local q = pos + obj:getNodePosition(n.cid) local dist = (q - hp):length()
+  if dist < r then
+    local w = 1 - dist / r
+    obj:applyForceVectorTime(n.cid, d * (obj:getNodeMass(n.cid) * dv * w * w / 0.03), 0.03)
+  end
+end
 ]]
 
 ------------------------------------------------------------------------------
@@ -137,18 +149,28 @@ function M.explode(x, y, z, r, now)
   end)
 end
 
--- A successful vanilla combat hit, including weapon, enchantment and mace damage.
-function M.hit(m, now)
-  local veh=scenetree.findObjectById(m.id)
-  if not veh or veh:getJBeamFilename()=='unicycle' then return end
-  if now-(attackCooldown[m.id] or -10)<0.1 then return end
-  attackCooldown[m.id]=now
-  local x,y,z=coords.mcToBng(m.x,m.y,m.z)
-  local dx,dy,dz=coords.mcToBng(m.dx,m.dy,m.dz)
-  local damage=math.max(0,math.min(200,m.dmg or 1))
-  local push=vec3(dx,dy,dz)*math.min(12,0.3+damage*0.23)
-  veh:applyClusterVelocityScaleAdd(veh:getRefNodeId(),1,push.x,push.y,math.max(-2,push.z)+0.2)
-  veh:queueLuaCommand(string.format(DENT,x,y,z,dx,dy,dz,math.min(8000,damage*110)))
+-- A successful vanilla combat hit. m.dmg is Minecraft's final damage for the swing:
+-- weapon, attack cooldown, crits, Sharpness/Smite, mace fall bonus all included
+-- (fist 1, iron sword 6, netherite axe 10, a mace smash can be 30+).
+M.dentPerDamage = 1.6     -- m/s of dent speed per point of damage
+M.dentRadiusBase = 0.18   -- metres
+M.dentRadiusPerDamage = 0.03
+function M.hit(m, now, eye)
+  local veh = scenetree.findObjectById(m.id)
+  if not veh or veh:getJBeamFilename() == 'unicycle' then return end
+  if now - (attackCooldown[m.id] or -10) < 0.1 then return end
+  attackCooldown[m.id] = now
+  local x, y, z = coords.mcToBng(m.x, m.y, m.z)
+  local dx, dy, dz = coords.mcToBng(m.dx, m.dy, m.dz)
+  local damage = math.max(0, math.min(200, m.dmg or 1))
+  log('I', 'beamcraft', string.format('hit car %d for %.1f damage', m.id, damage))
+  -- the whole car rocks a little; heavy hits shove it
+  local push = vec3(dx, dy, dz) * math.min(8, damage * 0.12)
+  veh:applyClusterVelocityScaleAdd(veh:getRefNodeId(), 1, push.x, push.y, math.max(-1, push.z) + 0.1)
+  local radius = math.min(1.4, M.dentRadiusBase + damage * M.dentRadiusPerDamage)
+  local dv = math.min(90, 3 + damage * M.dentPerDamage)
+  eye = eye or vec3(x, y, z) - vec3(dx, dy, dz) * 2
+  veh:queueLuaCommand(string.format(DENT, eye.x, eye.y, eye.z, dx, dy, dz, x, y, z, radius, dv))
 end
 
 function M.updateObstacles(world)

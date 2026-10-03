@@ -6,7 +6,8 @@
 		"LevelCollisionMixin",
 		"ServerExplosionMixin",
 		"ServerLevelMixin",
-		"ServerPlayerGameModeMixin"
+		"ServerPlayerGameModeMixin",
+		"PathfindingContextMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

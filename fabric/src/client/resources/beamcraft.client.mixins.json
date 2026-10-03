@@ -20,7 +20,10 @@
 		"QuadParticleAccessor",
 		"RenderTypeAccessor",
 		"RenderSetupAccessor",
-		"TextureBindingAccessor"
+		"TextureBindingAccessor",
+		"LivingEntityRendererAccess",
+		"AgeableMobRendererAccess",
+		"ModelPartAccess"
 	],
 	"injectors": {
 		"defaultRequire": 1

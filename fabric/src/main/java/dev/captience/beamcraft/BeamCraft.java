@@ -38,6 +38,7 @@ public class BeamCraft implements ModInitializer {
 		ServerLifecycleEvents.SERVER_STOPPING.register(BlockSync::onServerStopping);
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
 			VehicleTargets.tick(server);
+			MobSupport.tick(server);
 			if (++saveTimer >= 600) {
 				saveTimer = 0;
 				// the backend may get killed rather than quit: keep what was built on disk

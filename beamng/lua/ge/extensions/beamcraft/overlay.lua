@@ -1,77 +1,64 @@
--- Relay for Minecraft's GUI frames: Lua reads the frame patches from the hidden Minecraft
--- (raw mode of its overlay server, 127.0.0.1:47802) and hands each one to the UI page
--- (ui/modModules/beamcraft) untouched, directly into the canvas renderer.
+-- Minecraft's GUI, first-person hand and screen effects, drawn over BeamNG with imgui.
 --
--- Pull model with a three-frame window: we ask Minecraft for a frame (a byte on
--- the socket), it answers with one message holding every changed patch of that frame:
--- u32 little-endian length, then '[["fullW,fullH,x,y,w,h|<base64>", ...]]' - already the
--- JS hook's argument list, queued for the page as-is. The page acks once it has painted.
--- We decode ahead while a previous frame is in the UI queue, avoiding an entire
--- round trip of idle time without allowing an unbounded backlog.
+-- The hidden Minecraft renders them over a transparent background. For each frame it
+-- writes every changed 128 px tile as a small PNG file into /beamcraft/ov (a RAM disk
+-- linked into the userfolder) and tells us on its raw socket (127.0.0.1:47802) which
+-- files belong where:
+--   u32 little-endian length, then "W,H,T,full;tx,ty,name;tx,ty,-;..."
+-- We load each named file as a texture (well under a millisecond) and draw the whole
+-- grid every BeamNG frame on imgui's foreground layer.
+--
+-- This used to go through BeamNG's Chromium UI, which tops out around 37 fps here no
+-- matter what the game runs at - that was the choppy HUD and hand.
+--
+-- Pull model: each byte we send asks for one frame ('F' = whole frame). Two requests
+-- may be in flight, so the next frame is usually already rendered when we want it.
 
 local socket = require('socket.socket')
 local sbuf = require('string.buffer')
+local im = ui_imgui
 
 local M = {}
 
 M.port = 47802
-M.patches = 0
-M.bytes = 0
+M.frames = 0
+M.tilesLoaded = 0
+
+local WINDOW = 2
+local DIR = '/beamcraft/ov/'
 
 local sock
 local inbuf = sbuf.new()
-local need = nil   -- length of the patch being read, once its header has arrived
+local need = nil   -- length of the message being read, once its header has arrived
 local retry = 0
-local mcPending = 0
-local pagePending = 0
+local pending = 0
 local waitTime = 0
-local WINDOW = 3
-M.frames = 0
-local refreshOwner, savedRefresh
-local refreshTimer = 0
+local wantFull = false
 
--- BeamNG normally limits its main browser to 30 FPS. Its supported maximum is
--- 60 FPS (requests above 60 are clamped by the engine). Raise it while this HUD
--- is visible, and restore the user's previous rate when leaving Minecraft.
-function M.setVisible(enabled)
-  local cef = scenetree.maincef
-  if refreshOwner and (not enabled or cef ~= refreshOwner) then
-    pcall(function() refreshOwner:setMaxFPSLimit(savedRefresh) end)
-    refreshOwner, savedRefresh = nil, nil
-  end
-  if enabled and cef then
-    if not refreshOwner then
-      local ok, rate = pcall(function() return cef:getMaxFPSLimit() end)
-      if not ok then return end
-      refreshOwner, savedRefresh = cef, math.floor(rate + 0.5)
-    end
-    cef:setMaxFPSLimit(60)
-    M.browserCap = 60
-  else
-    M.browserCap = nil
-  end
-end
+local grid = { w = 0, h = 0, t = 128 }
+local tiles = {}   -- [ty * 4096 + tx] = { tex =, id =, x =, y = }
+
+local white = 0xFFFFFFFF
+
+local function clearTiles() tiles = {} end
+M.clear = clearTiles
 
 local function close()
   if sock then pcall(function() sock:close() end) end
   sock = nil
   inbuf:reset()
   need = nil
-  mcPending = 0
-  pagePending = 0
+  pending = 0
 end
 M.close = close
 function M.shutdown()
   close()
-  M.setVisible(false)
+  clearTiles()
 end
 
--- the page painted the last frame
-function M.ack(n)
-  n = math.max(1, math.min(WINDOW, tonumber(n) or 1))
-  pagePending = math.max(0, pagePending - n)
-  M.painted = (M.painted or 0) + n
-end
+-- kept for the old page API; nothing to acknowledge any more
+function M.ack() end
+function M.setVisible() end
 
 local function connect()
   local s = socket.tcp()
@@ -86,21 +73,52 @@ local function connect()
   sock = s
   inbuf:reset()
   need = nil
-  mcPending = 0
-  pagePending = 0
+  pending = 0
+  clearTiles()
   return true
 end
 
--- enabled: only pull frames while Steve is being played (Minecraft renders the
--- overlay only while someone is watching)
-function M.update(dt, enabled)
-  refreshTimer = refreshTimer - dt
-  if enabled ~= (refreshOwner ~= nil) or refreshTimer <= 0 then
-    M.setVisible(enabled)
-    refreshTimer = 1
+local function applyFrame(msg)
+  local first = true
+  local okAll = true
+  for part in msg:gmatch('[^;]+') do
+    if first then
+      first = false
+      local w, h, t, full = part:match('^(%d+),(%d+),(%d+),(%d)$')
+      if not w then return end
+      w, h, t = tonumber(w), tonumber(h), tonumber(t)
+      if full == '1' or w ~= grid.w or h ~= grid.h or t ~= grid.t then clearTiles() end
+      grid.w, grid.h, grid.t = w, h, t
+    else
+      local tx, ty, name = part:match('^(%d+),(%d+),(.+)$')
+      if tx then
+        tx, ty = tonumber(tx), tonumber(ty)
+        local key = ty * 4096 + tx
+        if name == '-' then
+          tiles[key] = nil
+        else
+          local tex = im.ImTextureHandler(DIR .. name)
+          local size = tex:getSize()
+          if size and size.x > 0 then
+            tiles[key] = { tex = tex, id = tex:getID(), x = tx, y = ty, w = size.x, h = size.y }
+            M.tilesLoaded = M.tilesLoaded + 1
+          else
+            -- the file is gone (we stalled longer than Minecraft keeps them)
+            tiles[key] = nil
+            okAll = false
+          end
+        end
+      end
+    end
   end
+  if not okAll then wantFull = true end
+end
+
+-- enabled: only pull frames while Steve is being played
+function M.update(dt, enabled)
   if not enabled then
     if sock then close() end
+    if next(tiles) then clearTiles() end
     return
   end
   if not sock then
@@ -118,6 +136,8 @@ function M.update(dt, enabled)
     if err then break end
   end
 
+  -- only the newest complete frame matters, but every frame's tiles must be applied
+  -- in order (each one only carries what changed)
   while true do
     if not need then
       if #inbuf < 4 then break end
@@ -125,34 +145,49 @@ function M.update(dt, enabled)
       need = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
     end
     if #inbuf < need then break end
-    local frame = inbuf:get(need)
-    M.bytes = M.bytes + need
+    local msg = inbuf:get(need)
     need = nil
     M.frames = M.frames + 1
-    mcPending = math.max(0, mcPending - 1)
-    if frame ~= '[[]]' then
-      M.patches = M.patches + 1
-      be:executeJS('window.beamcraftOverlay && window.beamcraftOverlay.frame((' .. frame .. ')[0]);')
-      pagePending = pagePending + 1
-    end
+    pending = math.max(0, pending - 1)
     waitTime = 0
+    applyFrame(msg)
   end
 
-  -- recover if a frame or UI ack got lost (e.g. the page reloaded)
-  if mcPending > 0 or pagePending >= WINDOW then
+  -- recover if a request got lost
+  if pending > 0 then
     waitTime = waitTime + dt
-    if waitTime > 0.5 then
-      if mcPending > 0 then close() return end
-      pagePending = 0
-      waitTime = 0
-    end
+    if waitTime > 0.5 then pending, waitTime = 0, 0 end
   end
-  while sock and mcPending + pagePending < WINDOW do
-    local sent, err = sock:send('N')
+  while sock and pending < WINDOW do
+    local sent = sock:send(wantFull and 'F' or 'N')
     if not sent then close() return end
-    mcPending = mcPending + 1
-    waitTime = 0
+    wantFull = false
+    pending = pending + 1
   end
 end
+
+-- every BeamNG frame, after everything else
+function M.draw()
+  if grid.w <= 0 or not next(tiles) then return end
+  local vp = im.GetMainViewport()
+  if not vp then return end
+  local sx, sy = vp.Size.x / grid.w, vp.Size.y / grid.h
+  local ox, oy = vp.Pos.x, vp.Pos.y
+  local t = grid.t
+  local dl = im.GetForegroundDrawList1()
+  local p0, p1 = im.ImVec2(0, 0), im.ImVec2(0, 0)
+  local uv0, uv1 = im.ImVec2(0, 0), im.ImVec2(1, 1)
+  for _, tile in pairs(tiles) do
+    -- each texture has a 1 px apron of its neighbours: draw only the inside
+    local x, y = tile.x * t, tile.y * t
+    p0.x, p0.y = ox + x * sx, oy + y * sy
+    p1.x, p1.y = ox + (x + tile.w - 2) * sx, oy + (y + tile.h - 2) * sy
+    uv0.x, uv0.y = 1 / tile.w, 1 / tile.h
+    uv1.x, uv1.y = (tile.w - 1) / tile.w, (tile.h - 1) / tile.h
+    im.ImDrawList_AddImage(dl, tile.id, p0, p1, uv0, uv1, white)
+  end
+end
+
+function M.size() return grid.w, grid.h end
 
 return M

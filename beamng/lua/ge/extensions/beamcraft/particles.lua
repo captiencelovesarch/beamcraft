@@ -1,44 +1,117 @@
-local mu=require('beamcraft/meshutil')
-local coords=require('beamcraft/coords')
-local M={}
-local particles={}
-local stamp=0
-local function step(v,n) return math.floor(math.max(0,math.min(1,v))*n+0.5)/n end
-function M.snapshot(msg,now)
-  stamp=stamp+1
-  local pending=false
+-- Minecraft's particles in BeamNG. Vanilla runs them (emission, physics, colour,
+-- sprite animation, size, lifetime); the hidden client sends every visible quad
+-- particle each tick and we draw them as camera-facing quads, interpolated between
+-- ticks.
+--
+-- All particles sharing a sprite texture and (quantized) tint go into one mesh that is
+-- rebuilt every frame around the camera - a few meshes in total, instead of one scene
+-- object per particle that had to be deleted and recreated whenever its sprite
+-- animated or its colour changed.
+
+local mu = require('beamcraft/meshutil')
+local coords = require('beamcraft/coords')
+
+local M = {}
+
+local particles = {}  -- id -> { prev, cur, at, seen }
+local groups = {}     -- material key -> { obj, mat, used }
+local stamp = 0
+local HIDE = -100000
+
+local function step(v, n) return math.floor(math.max(0, math.min(1, v)) * n + 0.5) / n end
+
+function M.snapshot(msg, now)
+  stamp = stamp + 1
   for _, p in ipairs(msg.l or {}) do
-    local r,g,b,a=step(p.r,16),step(p.g,16),step(p.b,16),step(p.a,16)
-    local key=p.tex..':'..r..':'..g..':'..b..':'..a..':'..table.concat(p.uv,',')
-    local ent=particles[p.id]
-    if not ent then ent={cur=p} particles[p.id]=ent end
-    if ent.key~=key then
-      mu.deleteObject(ent.obj)
-      local mat=mu.material('bc_particle_'..key:gsub('[^%w]','_'), {
-        Stages={{baseColorMap=p.tex,baseColorFactor={r,g,b,1},opacityMap=p.mask,opacityFactor=a,roughnessFactor=1,metallicFactor=0},{},{},{}},
-        translucent=true,translucentBlendOp='LerpAlpha',translucentZWrite=false,doubleSided=true,castShadows=false, useAnisotropic=false,
-      })
-      local m=mu.newMesh(mat)
-      mu.addQuad(m,{-1,0,1},{1,0,1},{1,0,-1},{-1,0,-1},p.uv[1],p.uv[2],p.uv[3],p.uv[4],0,-1,0)
-      ent.obj=mu.newObject('beamcraft_particle', {m}) ent.key=key pending=true
+    local e = particles[p.id]
+    if not e then
+      e = { cur = p }
+      particles[p.id] = e
     end
-    ent.prev,ent.cur,ent.at,ent.seen=ent.cur,p,now,stamp
+    e.prev, e.cur, e.at, e.seen = e.cur, p, now, stamp
+  end
+  for id, e in pairs(particles) do
+    if e.seen ~= stamp then particles[id] = nil end
+  end
+end
+
+local function groupFor(p)
+  local r, g, b, a = step(p.r, 16), step(p.g, 16), step(p.b, 16), step(p.a, 8)
+  local key = p.tex .. ':' .. r .. ':' .. g .. ':' .. b .. ':' .. a
+  local grp = groups[key]
+  if not grp then
+    local mat = mu.material('bc_particle_' .. key:gsub('[^%w]', '_'), {
+      Stages = { { baseColorMap = p.tex, baseColorFactor = { r, g, b, 1 }, opacityMap = p.mask, opacityFactor = a,
+        roughnessFactor = 1, metallicFactor = 0, }, {}, {}, {} },
+      translucent = true, translucentBlendOp = 'LerpAlpha', translucentZWrite = false, doubleSided = true,
+      castShadows = false, useAnisotropic = false, dynamicCubemap = false,
+    })
+    grp = { mat = mat }
+    groups[key] = grp
+  end
+  return grp
+end
+
+function M.update(now)
+  for _, grp in pairs(groups) do grp.mesh = nil end
+  if next(particles) == nil then
+    for _, grp in pairs(groups) do
+      if grp.obj and grp.shown then mu.setXform(grp.obj, 0, 0, HIDE, mu.IDENTITY) grp.shown = false end
+    end
+    return
+  end
+  local cam = getCameraPosition()
+  local fwd = core_camera.getForward()
+  local right = fwd:cross(vec3(0, 0, 1))
+  if right:length() < 1e-4 then right = vec3(1, 0, 0) end
+  right:normalize()
+  local up = right:cross(fwd)
+  up:normalize()
+  local pending = false
+  for _, e in pairs(particles) do
+    local c, p = e.cur, e.prev or e.cur
+    local t = math.min(1, (now - e.at) / 0.05)
+    local x, y, z = coords.mcToBng(p.x + (c.x - p.x) * t, p.y + (c.y - p.y) * t, p.z + (c.z - p.z) * t)
+    local grp = groupFor(c)
+    if not grp.obj then pending = true end
+    local m = grp.mesh
+    if not m then
+      m = mu.newMesh(grp.mat)
+      grp.mesh = m
+    end
+    -- camera-facing quad, half size s, rolled like vanilla
+    local s = c.s or 0.1
+    local roll = c.roll or 0
+    local cr, sr = math.cos(roll) * s, math.sin(roll) * s
+    local ax, ay, az = right.x * cr + up.x * sr, right.y * cr + up.y * sr, right.z * cr + up.z * sr
+    local bx, by, bz = up.x * cr - right.x * sr, up.y * cr - right.y * sr, up.z * cr - right.z * sr
+    local ox, oy, oz = x - cam.x, y - cam.y, z - cam.z
+    local uv = c.uv
+    mu.addQuad(m,
+      { ox - ax + bx, oy - ay + by, oz - az + bz }, { ox + ax + bx, oy + ay + by, oz + az + bz },
+      { ox + ax - bx, oy + ay - by, oz + az - bz }, { ox - ax - bx, oy - ay - by, oz - az - bz },
+      uv[1], uv[2], uv[3], uv[4], -fwd.x, -fwd.y, -fwd.z)
   end
   if pending then mu.flushMaterials() end
-  for id,e in pairs(particles) do if e.seen~=stamp then mu.deleteObject(e.obj) particles[id]=nil end end
-end
-function M.update(now)
-  local camera=getCameraPosition()
-  for _,e in pairs(particles) do
-    local t=math.min(1,(now-e.at)/0.05) local p,c=e.prev,e.cur
-    local x,y,z=coords.mcToBng(p.x+(c.x-p.x)*t,p.y+(c.y-p.y)*t,p.z+(c.z-p.z)*t)
-    local dir=(camera-vec3(x,y,z)):normalized()
-    -- quad faces -Y; rotate this plane to face the camera, then apply vanilla roll.
-    local yaw=math.atan2(dir.x,-dir.y)
-    local pitch=math.asin(math.max(-1,math.min(1,dir.z)))
-    local q=mu.qmul(mu.qaxis(0,0,1,yaw),mu.qmul(mu.qaxis(1,0,0,-pitch),mu.qaxis(0,1,0,c.roll or 0)))
-    mu.setXform(e.obj,x,y,z,q) e.obj:setScale(vec3(c.s,c.s,c.s))
+  for _, grp in pairs(groups) do
+    if grp.mesh then
+      if not grp.obj then
+        grp.obj = mu.newObject('beamcraft_particles', { grp.mesh })
+      else
+        grp.obj:createMesh({ { grp.mesh } })
+      end
+      mu.setXform(grp.obj, cam.x, cam.y, cam.z, mu.IDENTITY)
+      grp.shown = true
+    elseif grp.obj and grp.shown then
+      mu.setXform(grp.obj, 0, 0, HIDE, mu.IDENTITY)
+      grp.shown = false
+    end
   end
 end
-function M.clear() for _,e in pairs(particles) do mu.deleteObject(e.obj) end particles={} end
+
+function M.clear()
+  for _, grp in pairs(groups) do mu.deleteObject(grp.obj) end
+  groups, particles = {}, {}
+end
+
 return M

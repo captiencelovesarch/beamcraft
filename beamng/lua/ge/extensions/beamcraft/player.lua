@@ -185,6 +185,14 @@ function M.updateThird(snap, ctx)
   local bx, by, bz = coords.mcToBng(snap.x, snap.y, snap.z)
   local yawB = pi - math.rad(snap.by or 0)
   local qBody = mu.qaxis(0, 0, 1, yawB)
+  -- vanilla's extra body rotation (elytra flight, swimming, riptide, dying) about the
+  -- feet, in the yawed body frame; MC axes (x, y, z) are our (x, -z, y) there
+  local bt = snap.bt
+  if bt then
+    local ox, oy, oz = mu.qrot(qBody, bt[5], -bt[7], bt[6])
+    bx, by, bz = bx + ox, by + oy, bz + oz
+    qBody = mu.qmul(qBody, { bt[1], -bt[3], bt[2], bt[4] })
+  end
   local worldParts = {}
   for name, def in pairs(defs) do
     local part = snap.m and snap.m[name]

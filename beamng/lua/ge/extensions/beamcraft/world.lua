@@ -173,6 +173,7 @@ end
 function M.hasPendingCollision() return collisionPending end
 
 local rebuildSection
+local carNearEdits
 
 -- rebuild BeamNG's collision now if anything changed (e.g. when you get back in a car)
 function M.rebuildCollisionNow()
@@ -336,7 +337,7 @@ rebuildSection = function(key)
         scenetree.MissionGroup:add(obj.obj)
         sec.objs[cflag] = obj
       end
-      obj:createMesh(cflag == 0 and { list, {} } or { list }, false)
+      obj:createMesh({ list })
       if cflag == 0 then obj:enableCollision() end
       if cflag == 1 then sec.disabled=true end
     end
@@ -344,6 +345,21 @@ rebuildSection = function(key)
   collisionPending = true
   dirtyCentres[#dirtyCentres + 1] = vec3(bx + 8, by - 8, bz + 8)
   return true
+end
+
+-- a moving car close to something built since the last collision rebuild
+M.carCheckRadius = 40
+carNearEdits = function()
+  if #dirtyCentres == 0 then return false end
+  for _, veh in ipairs(getAllVehicles()) do
+    if veh:getJBeamFilename() ~= 'unicycle' and veh:getVelocity():length() > 1 then
+      local p = veh:getPosition()
+      for _, c in ipairs(dirtyCentres) do
+        if (p - c):length() < M.carCheckRadius + 12 then return true end
+      end
+    end
+  end
+  return false
 end
 
 function M.update(dt)
@@ -363,7 +379,10 @@ function M.update(dt)
   sinceRebuild = sinceRebuild + dt
   if collisionPending then
     collisionTimer = collisionTimer + dt
-    if collisionTimer >= M.collisionDelay and #dirtyQueue == 0 and sinceRebuild >= M.minRebuildInterval then
+    -- A rebuild freezes the game for ~0.3 s and only cars care about it: building
+    -- with nobody driving around stays smooth. Getting into a car rebuilds anyway.
+    if collisionTimer >= M.collisionDelay and #dirtyQueue == 0 and sinceRebuild >= M.minRebuildInterval
+        and carNearEdits() then
       M.rebuildCollisionNow()
     end
   end

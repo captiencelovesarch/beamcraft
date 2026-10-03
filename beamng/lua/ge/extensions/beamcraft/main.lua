@@ -52,6 +52,16 @@ local input = {
 local inputDirty = true
 local events = {}             -- one-shot key events to send this frame
 
+-- Forget held buttons. Leaving BeamCraft (e.g. right-clicking a car to get in) pops
+-- our action map before the button's release arrives, so without this the button
+-- would still read as held when you come back.
+local function releaseInput()
+  input.f, input.b, input.l, input.r = 0, 0, 0, 0
+  input.jump, input.sneak, input.sprint, input.attack, input.use = 0, 0, 0, 0, 0
+  events = {}
+  inputDirty = true
+end
+
 ------------------------------------------------------------------------------
 -- outgoing
 ------------------------------------------------------------------------------
@@ -92,12 +102,13 @@ end
 
 -- the overlay page (ui/modModules/beamcraft) asks for this, and gets pushed changes
 function M.overlayState()
-  return { visible = active, interactive = active and screenOpen }
+  local w, h = overlay.size()
+  return { visible = active, interactive = active and screenOpen, w = w, h = h }
 end
 
 local function pushOverlayState()
   local st = M.overlayState()
-  local key = tostring(st.visible) .. tostring(st.interactive)
+  local key = tostring(st.visible) .. tostring(st.interactive) .. st.w .. 'x' .. st.h
   if key ~= overlaySent then
     overlaySent = key
     guihooks.trigger('BeamCraftOverlay', st)
@@ -223,6 +234,19 @@ local function lerpPose(poseA, poseB, t)
   return result
 end
 
+-- body tilt (elytra, swimming...): {qx,qy,qz,qw, tx,ty,tz}, nil = upright
+local function lerpTilt(ta, tb, t)
+  if not ta and not tb then return nil end
+  ta, tb = ta or { 0, 0, 0, 1, 0, 0, 0 }, tb or { 0, 0, 0, 1, 0, 0, 0 }
+  local sg = (ta[1] * tb[1] + ta[2] * tb[2] + ta[3] * tb[3] + ta[4] * tb[4]) < 0 and -1 or 1
+  local r, n = {}, 0
+  for i = 1, 4 do r[i] = ta[i] + (tb[i] * sg - ta[i]) * t n = n + r[i] * r[i] end
+  n = math.sqrt(n)
+  for i = 1, 4 do r[i] = r[i] / n end
+  for i = 5, 7 do r[i] = ta[i] + (tb[i] - ta[i]) * t end
+  return r
+end
+
 -- interpolated Minecraft pose (MC coords / degrees), or nil
 local function poseNow()
   if not curSnap then return nil end
@@ -237,6 +261,7 @@ local function poseNow()
     fps = c.fps, fpsCap = c.fpsCap, configuredCap = c.configuredCap,
     sw = c.sw, cr = c.cr, held = c.held, hs = c.hs, ir = c.ir, il = c.il,
     m = lerpPose(p.m, c.m, a),
+    bt = lerpTilt(p.bt, c.bt, a),
   }
 end
 M.poseNow = poseNow
@@ -305,6 +330,7 @@ function M.enter()
   local mcYaw = coords.bngLookToMc(yaw, 0)
   terrain.reset()
   prevSnap = nil
+  releaseInput()
   net.send({ t = 'enter', x = mx, y = my, z = mz, yaw = mcYaw })
   -- prime the camera where Steve will appear, so there is no flash
   curSnap = { x = mx, y = my, z = mz, eye = 1.62, at = now, by = mcYaw, hy = mcYaw }
@@ -328,6 +354,7 @@ function M.exit()
   overlay.setVisible(false)
   setScreenOpen(false)
   if setCEFTyping then setCEFTyping(false) end
+  releaseInput()
   net.send({ t = 'exit' })
   if lockMouse then lockMouse(false) end
   hideBeamNGUi(false)
@@ -384,7 +411,16 @@ handlers.icons = function(m) hud.iconsDir = m.dir end
 handlers.ents = function(m) entities.snapshot(m, now, ctx) end
 handlers.itemModel = function(m) items.define(m) end
 handlers.particles = function(m) particles.snapshot(m, now) end
-handlers.vehHit = function(m) vehicles.hit(m, now) end
+handlers.mobModel = function(m) entities.defineModel(m) end
+-- Minecraft wants to spawn a mob here: tell it where the ground is
+handlers.probe = function(m)
+  local ter = terrain.around(m.x, m.y, m.z, 1.5, 24, 64)
+  if ter then net.send(ter) end
+end
+handlers.vehHit = function(m)
+  local eye = M.getEyePos()
+  vehicles.hit(m, now, eye and vec3(eye) or nil)
+end
 handlers.vehUse = function(m)
   local veh = scenetree.findObjectById(m.id)
   if active and veh and veh:getJBeamFilename() ~= 'unicycle' then M.exit() be:enterVehicle(0, veh) end
@@ -438,15 +474,16 @@ terrain.withoutBlocks = world.withoutCollision
 world.onCollisionReloaded = function() terrain.invalidateAll() end
 
 local inputTimer = 0
+local mobGroundTimer = 0
 local obstacleTimer = 0
 
 local function drawTarget()
   if not target then return end
   local x, y, z = target[1], target[2], target[3]
-  local e = 0.003
+  local e = 0.006
   local bx0, by1, bz0 = coords.mcToBng(x - e, y - e, z - e)
   local bx1, by0, bz1 = coords.mcToBng(x + 1 + e, y + 1 + e, z + 1 + e)
-  entities.boxLines(bx0, by0, bz0, bx1, by1, bz1, ColorF(0, 0, 0, 0.75))
+  entities.boxLines(bx0, by0, bz0, bx1, by1, bz1, ColorF(0, 0, 0, 0.75), true)
 end
 
 local function statusLines()
@@ -456,8 +493,8 @@ local function statusLines()
   if net.isConnected() then
     lines[2] = string.format('blocks %d  sections %d  states %d  dirty %d',
       world.getTotalBlocks(), world.getSectionCount(), world.getStateCount(), world.getDirtyCount())
-    lines[4] = string.format('overlay patches %d (%.1f MB)  BeamNG %.0f fps, Minecraft %s fps', overlay.patches,
-      overlay.bytes / 1048576, M.fps or 0, tostring(curSnap and curSnap.fps or '?'))
+    lines[4] = string.format('overlay frames %d, tiles %d  BeamNG %.0f fps, Minecraft %s fps', overlay.frames,
+      overlay.tilesLoaded, M.fps or 0, tostring(curSnap and curSnap.fps or '?'))
     lines[3] = string.format('collision %s, last rebuild %s ms (x%d)',
       world.hasPendingCollision() and 'pending' or 'up to date',
       world.lastCollisionMs and string.format('%.0f', world.lastCollisionMs) or '-', world.collisionReloads)
@@ -472,6 +509,9 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   local msgs = net.update(dtReal, function()
     ready = false
+    -- a (re)started Minecraft numbers its mob models afresh
+    entities.clear()
+    entities.forgetModels()
     sendHello()
   end, function()
     ready = false
@@ -519,6 +559,15 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     -- terrain under Steve
     local ter = terrain.update(fx, fy, fz)
     if ter then net.send(ter) end
+    -- ground under the mobs, so they walk on BeamNG's world too
+    mobGroundTimer = mobGroundTimer + dtReal
+    if mobGroundTimer > 0.2 then
+      mobGroundTimer = 0
+      for _, feet in ipairs(entities.mobFeet()) do
+        local mt = terrain.around(feet[1], feet[2], feet[3], 4)
+        if mt then net.send(mt) end
+      end
+    end
 
     -- cars: solid to Steve (10 Hz), and they hurt
     local feetB = vec3(coords.mcToBng(fx, fy, fz))
@@ -555,6 +604,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     drawTarget()
   end
 
+  if active then overlay.draw() end
   hud.drawStatus(statusLines())
 end
 

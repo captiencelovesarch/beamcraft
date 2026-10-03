@@ -173,7 +173,7 @@ public class BeamCraftClient implements ClientModInitializer {
 		instance.receive(mc);
 		instance.applyOverlayInput(mc);
 		if (controlling && mc.player != null && instance.haveLook) {
-			mc.player.setYRot(instance.inYaw);
+			mc.player.setYRot(continuousYaw(mc.player, instance.inYaw));
 			mc.player.setXRot(Math.max(-90f, Math.min(90f, instance.inPitch)));
 			mc.player.yRotO = mc.player.getYRot(); mc.player.xRotO = mc.player.getXRot();
 		}
@@ -243,6 +243,7 @@ public class BeamCraftClient implements ClientModInitializer {
 		switch (t) {
 			case "_connect" -> {
 				ItemExport.reset();
+				EntityModelExport.reset();
 				sentStates.clear();
 				lastHud = "";
 				atlasSent = false;
@@ -304,7 +305,10 @@ public class BeamCraftClient implements ClientModInitializer {
 
 	private void onHello(Minecraft mc, JsonObject m) {
 		beamLevel = m.has("level") ? m.get("level").getAsString() : "none";
-		if (m.has("userPath")) userPath = Path.of(m.get("userPath").getAsString());
+		if (m.has("userPath")) {
+			userPath = Path.of(m.get("userPath").getAsString());
+			OverlayCapture.setUserPath(userPath);
+		}
 		if (m.has("vw") && m.has("vh")) applyViewport(mc, m.get("vw").getAsInt(), m.get("vh").getAsInt());
 		// BeamNG's main menu has no level: no world either, so nothing can fall into the void
 		desiredWorld = beamLevel.isEmpty() || beamLevel.equals("none") ? null : worldIdFor(beamLevel);
@@ -407,6 +411,14 @@ public class BeamCraftClient implements ClientModInitializer {
 		return e == null || e.isJsonNull() ? 0 : e.getAsDouble();
 	}
 
+	/**
+	 * BeamNG's yaw lives in -180..180; Minecraft's is continuous. Jumping 360 degrees at
+	 * the seam made the first-person hand sway (yBob chases yaw) whip around.
+	 */
+	private static float continuousYaw(LocalPlayer p, float yaw) {
+		return p.getYRot() + net.minecraft.util.Mth.wrapDegrees(yaw - p.getYRot());
+	}
+
 	private void applyInput(Minecraft mc) {
 		LocalPlayer p = mc.player;
 		if (p == null) return;
@@ -429,7 +441,7 @@ public class BeamCraftClient implements ClientModInitializer {
 		o.keyAttack.setDown(inAttack);
 		o.keyUse.setDown(inUse);
 		if (haveLook) {
-			p.setYRot(inYaw);
+			p.setYRot(continuousYaw(p, inYaw));
 			p.setXRot(Math.max(-90f, Math.min(90f, inPitch)));
 			p.yRotO = p.getYRot();
 			p.xRotO = p.getXRot();
@@ -523,6 +535,12 @@ public class BeamCraftClient implements ClientModInitializer {
 			.append(",\"configuredCap\":").append(mc.options.framerateLimit().get())
 			.append(",\"fall\":").append(r4(p.fallDistance));
 		appendVanillaPose(mc, p, sb);
+		float[] tilt = EntityModelExport.bodyTilt(mc, p);
+		if (tilt != null) {
+			sb.append(",\"bt\":[");
+			for (int i = 0; i < tilt.length; i++) sb.append(i > 0 ? "," : "").append(r4(tilt[i]));
+			sb.append(']');
+		}
 		appendArmor(mc, p, sb);
 		Path renderRoot = userPath == null ? null : userPath.resolve("beamcraft/render");
 		boolean leftMain = p.getMainArm() == net.minecraft.world.entity.HumanoidArm.LEFT;
@@ -746,14 +764,25 @@ public class BeamCraftClient implements ClientModInitializer {
 			} else if (e instanceof net.minecraft.world.entity.item.PrimedTnt tnt) {
 				kind = "b";
 				extra = Integer.toString(stateForBeamNG(Block.getId(tnt.getBlockState())));
-			} else if (e instanceof net.minecraft.world.entity.ExperienceOrb) {
+			} else if (e instanceof net.minecraft.world.entity.ExperienceOrb orb) {
+				// the orb's own sprite (one of 16 sizes on experience_orb.png)
 				kind = "x";
-				extra = "0";
-			} else if (e instanceof net.minecraft.world.entity.LivingEntity) {
-				kind = "m";
-				extra = '"' + BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).toString() + '"';
+				int icon = orb.getIcon();
+				String tex = null;
+				try {
+					var t = RenderAssets.file(mc, userPath == null ? null : userPath.resolve("beamcraft/render"),
+						Identifier.withDefaultNamespace("textures/entity/experience_orb.png"), -1);
+					if (t != null) tex = "{\"tx\":\"" + t.color() + "\",\"mk\":\"" + t.mask() + "\",\"i\":" + icon + "}";
+				} catch (Exception ignored) {
+				}
+				if (tex == null) continue;
+				extra = tex;
 			} else {
-				continue;
+				// mobs, armour stands, boats, minecarts...: whatever models vanilla draws
+				String pose = EntityModelExport.pose(mc, userPath == null ? null : userPath.resolve("beamcraft/render"), e);
+				if (pose == null) continue;
+				kind = "m";
+				extra = pose;
 			}
 			if (n++ > 0) sb.append(',');
 			sb.append('[').append(e.getId()).append(",\"").append(kind).append("\",")

@@ -77,6 +77,16 @@ public final class TerrainColumns {
 		return h != null;
 	}
 
+	/**
+	 * Whether block cell (x, y, z) is mostly below BeamNG's surface (for pathfinding,
+	 * which only understands whole blocks). Unknown ground is not solid.
+	 */
+	public static boolean isSolidCell(int x, int y, int z) {
+		Float h = heightAt(x + 0.5, z + 0.5);
+		if (h == null || h <= NONE + 1) return false;
+		return y + 0.5 < h && y + 1 > h - DEPTH;
+	}
+
 	public static boolean appliesTo(Level level) {
 		return enabled && level.dimension() == Level.OVERWORLD;
 	}

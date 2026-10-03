@@ -2,10 +2,9 @@
 //
 // The hidden Minecraft renders its HUD, first-person hand, screen effects and every
 // screen (inventory, crafting, chests, chat, death screen) over a transparent
-// background. BeamNG's Lua relays the changed part of each frame here
-// as "fullW,fullH,x,y,w,h|<base64 RGBA>";
-// we paint it on a full-screen canvas. While a Minecraft screen is open, mouse and
-// keyboard go back the same way (page -> Lua -> Minecraft) as GLFW events.
+// background; BeamNG's Lua draws it with imgui (see lua/.../beamcraft/overlay.lua).
+// This page only forwards input: while a Minecraft screen is open, mouse and keyboard
+// go page -> Lua -> Minecraft as GLFW events.
 
 // DOM KeyboardEvent.code -> GLFW key code
 const GLFW_KEYS = (() => {
@@ -40,102 +39,67 @@ class BeamCraftOverlay {
   constructor() {
     this.visible = false
     this.interactive = false
-    this.patches = 0
+    // An empty, transparent surface: BeamNG's Lua draws Minecraft's GUI with imgui
+    // (Chromium can't keep up with the game's frame rate). This page only catches the
+    // mouse and keyboard while a Minecraft screen is open; its size is Minecraft's
+    // window size, so event coordinates map straight to Minecraft pixels.
     this.canvas = document.createElement('canvas')
     this.canvas.id = 'beamcraft-overlay'
+    this.canvas.width = 1
+    this.canvas.height = 1
     Object.assign(this.canvas.style, {
       position: 'fixed', left: '0', top: '0', width: '100%', height: '100%',
-      zIndex: '2147483646', pointerEvents: 'none', imageRendering: 'pixelated', display: 'none',
-      willChange: 'transform', transform: 'translateZ(0)', contain: 'strict',
+      zIndex: '2147483646', pointerEvents: 'none', display: 'none', background: 'transparent',
     })
-    this.ctx = this.canvas.getContext('2d', { alpha: true, desynchronized: true })
-    this.ctx.imageSmoothingEnabled = false
-    this.frames = []
-    this.presented = 0
-    this.decodeMs = 0
-    this.maxQueue = 0
-    this.rafCount = 0
-    this.measureStart = performance.now()
-    const present = (now) => {
-      this.rafCount++
-      let acknowledgements = 0
-      while (this.frames.length && this.frames[0].ready) {
-        const frame = this.frames.shift()
-        if (frame.error) toLua({ t: 'full' })
-        else for (const apply of frame.patches) apply()
-        acknowledgements++
-        this.presented++
-      }
-      if (acknowledgements && window.bngApi?.engineLua) window.bngApi.engineLua('beamcraft_main.overlayAck(' + acknowledgements + ')')
-      if (now - this.measureStart > 2000) {
-        const fps = this.rafCount * 1000 / (now - this.measureStart)
-        if (window.bngApi?.engineLua) window.bngApi.engineLua('beamcraft_main.overlayMetrics(' + fps.toFixed(1) + ',' + this.decodeMs.toFixed(1) + ',' + this.maxQueue + ')')
-        this.rafCount = 0; this.measureStart = now; this.maxQueue = this.frames.length
-      }
-      requestAnimationFrame(present)
+    // BeamNG only stops its own keybindings (E = radial menu...) while a text field in
+    // its UI has focus, so while a Minecraft screen is open this invisible one holds it.
+    this.keys = document.createElement('input')
+    this.keys.type = 'text'
+    this.keys.id = 'beamcraft-keys'
+    this.keys.setAttribute('autocomplete', 'off')
+    Object.assign(this.keys.style, {
+      position: 'fixed', left: '0', top: '0', width: '1px', height: '1px', opacity: '0',
+      border: '0', padding: '0', zIndex: '2147483647', pointerEvents: 'none',
+    })
+    this.keys.addEventListener('input', () => { this.keys.value = '' })
+    this.keys.addEventListener('blur', () => {
+      // something else took focus (a click on the canvas does that): take it back
+      if (this.interactive) setTimeout(() => this.grabKeys(), 0)
+    })
+    const attach = () => {
+      if (!document.body) return setTimeout(attach, 200)
+      document.body.appendChild(this.canvas)
+      document.body.appendChild(this.keys)
     }
-    requestAnimationFrame(present)
-    const attach = () => document.body ? document.body.appendChild(this.canvas) : setTimeout(attach, 200)
     attach()
     this.bindInput()
   }
 
-  resize(w, h) {
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w; this.canvas.height = h
-      this.ctx.imageSmoothingEnabled = false
-    }
-  }
-
-  async decodePatch(str) {
-    if (typeof str !== 'string') return () => {}
-    if (str.startsWith('C|')) {
-      const [w, h] = str.substring(2).split(',').map(Number)
-      return () => { this.resize(w, h); this.ctx.clearRect(0, 0, w, h) }
-    }
-    const png = str.startsWith('P|'), raw = str.startsWith('R|')
-    const start = png || raw ? 2 : 0, bar = str.indexOf('|', start)
-    const [fw, fh, x, y, w, h] = str.substring(start, bar).split(',').map(Number)
-    if (![fw, fh, x, y, w, h].every(Number.isFinite) || !w || !h) return () => {}
-    const binary = atob(str.substring(bar + 1))
-    const bytes = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-    if (png) {
-      const blob = new Blob([bytes], { type: 'image/png' })
-      let image
-      if (typeof createImageBitmap === 'function') image = await createImageBitmap(blob, { premultiplyAlpha: 'premultiply' })
-      else image = await new Promise((resolve, reject) => {
-        const img = new Image(), url = URL.createObjectURL(blob)
-        img.onload = () => { URL.revokeObjectURL(url); resolve(img) }
-        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('PNG decode failed')) }
-        img.src = url
-      })
-      return () => {
-        this.resize(fw, fh)
-        this.ctx.clearRect(x, y, w, h); this.ctx.drawImage(image, x, y)
-        if (image.close) image.close()
-        this.patches++
-      }
-    }
-    const pixels = new ImageData(new Uint8ClampedArray(bytes.buffer), w, h)
-    return () => { this.resize(fw, fh); this.ctx.putImageData(pixels, x, y); this.patches++ }
-  }
-
-  frame(patches) {
-    const frame = { ready: false, patches: [] }, started = performance.now()
-    this.frames.push(frame)
-    this.maxQueue = Math.max(this.maxQueue, this.frames.length)
-    Promise.all((Array.isArray(patches) ? patches : [patches]).map(p => this.decodePatch(p)))
-      .then(result => { frame.patches = result })
-      .catch(error => { console.error('[BeamCraft] overlay decode failed', error); frame.error = true })
-      .finally(() => { this.decodeMs = performance.now() - started; frame.ready = true })
+  grabKeys() {
+    if (!this.interactive) return
+    if (document.activeElement !== this.keys) this.keys.focus({ preventScroll: true })
+    if (window.bngApi && window.bngApi.engineLua) window.bngApi.engineLua('setCEFTyping(true)')
   }
 
   setState(state) {
     if (!state) return
     this.visible = !!state.visible
     this.interactive = this.visible && !!state.interactive
-    this.canvas.style.display = this.visible ? 'block' : 'none'
+    if (state.w > 0 && state.h > 0 && (this.canvas.width !== state.w || this.canvas.height !== state.h)) {
+      this.canvas.width = state.w
+      this.canvas.height = state.h
+    }
+    const was = this.wasInteractive
+    this.wasInteractive = this.interactive
+    if (this.interactive) this.grabKeys()
+    else if (was) {
+      this.keys.blur()
+      if (window.bngApi && window.bngApi.engineLua) window.bngApi.engineLua('setCEFTyping(false)')
+    }
+    this.canvas.style.display = this.interactive ? 'block' : 'none'
+    // BeamNG hands the mouse to its UI only over pixels that aren't fully transparent:
+    // a 2% tint (under Minecraft's own dimmed screen background) makes it clickable
+    this.canvas.style.background = this.interactive ? 'rgba(0, 0, 0, 0.02)' : 'transparent'
     this.canvas.style.pointerEvents = this.interactive ? 'auto' : 'none'
     this.canvas.style.cursor = this.interactive ? 'default' : 'none'
   }
@@ -195,7 +159,6 @@ const overlay = new BeamCraftOverlay()
 window.beamcraftOverlay = overlay
 
 window.angular.module('beamcraft', []).run(['$rootScope', function ($rootScope) {
-  $rootScope.$on('BeamCraftFrame', (ev, patches) => overlay.frame(patches))
   // visibility/interactivity: guihooks.trigger('BeamCraftOverlay', {visible=, interactive=})
   $rootScope.$on('BeamCraftOverlay', (ev, data) => overlay.setState(data))
 }])

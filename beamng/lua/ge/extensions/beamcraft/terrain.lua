@@ -47,9 +47,10 @@ function M.invalidateAll()
 end
 
 -- feetX/Y/Z in Minecraft coordinates. Returns a message table or nil.
-local function sample(feetX, feetY, feetZ)
+local function sample(feetX, feetY, feetZ, radius, above, reach)
   local r = M.res
-  local rad = M.radius
+  local rad = radius or M.radius
+  above, reach = above or M.above, reach or M.reach
   local ci, ck = floor(feetX / r), floor(feetZ / r)
   local n = math.ceil(rad / r)
   local rays = 0
@@ -69,12 +70,12 @@ local function sample(feetX, feetY, feetZ)
           rays = rays + 1
           local cx, cz = (i + 0.5) * r, (k + 0.5) * r
           local bx, by = cx, -cz
-          local startZ = feetY + M.above
+          local startZ = feetY + above
           origin:set(bx, by, startZ)
-          local hit = Engine.castRay(origin, origin + down * M.reach, true, false)
+          local hit = Engine.castRay(origin, origin + down * reach, true, false)
           local d = hit and hit.dist
           local h = NONE
-          if d and d < M.reach then h = startZ - d end
+          if d and d < reach then h = startZ - d end
           if not c then c = {} cache[key] = c end
           c.h, c.at = h, feetY
           out[cnt + 1], out[cnt + 2], out[cnt + 3] = i, k, h
@@ -94,6 +95,13 @@ end
 function M.update(x,y,z)
   if M.withoutBlocks then return M.withoutBlocks(function() return sample(x,y,z) end) end
   return sample(x,y,z)
+end
+
+-- ground around a mob (or a spot Minecraft wants to spawn one at), MC coords
+function M.around(x, y, z, radius, above, reach)
+  local f = function() return sample(x, y, z, radius, above, reach) end
+  if M.withoutBlocks then return M.withoutBlocks(f) end
+  return f()
 end
 
 -- Where the crosshair meets BeamNG's world (MC coords), for placing blocks on the

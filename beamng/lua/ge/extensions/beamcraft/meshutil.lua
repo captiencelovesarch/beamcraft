@@ -189,11 +189,9 @@ function M.newObject(prefix, meshes)
   obj.canSave = false
   obj:registerObject(string.format('%s_%d', prefix, counter))
   scenetree.MissionGroup:add(obj.obj)
-  -- BeamNG uses the last mesh group for static collision. An explicit empty
-  -- collision group keeps these animated visuals out of collision rebuilds.
-  if meshes and #meshes > 0 then obj:createMesh({ meshes, {} }, false) end
-  -- disableCollision() removes ProceduralMesh from the render scene as well.
-  obj:enableCollision()
+  -- one mesh group only: an empty extra group ({ meshes, {} }) makes createMesh fail
+  -- ("verts must be a table"), and a group holding an empty mesh crashes BeamNG
+  if meshes and #meshes > 0 then obj:createMesh({ meshes }) end
   return obj
 end
 

@@ -158,8 +158,11 @@ public final class OverlayServer {
 				RAW_CLIENTS.add(s);
 				needFullFrame = true;
 				LOG.info("Overlay raw viewer (BeamNG Lua) connected");
-				// every byte is a request for the next frame
-				while (in.read() != -1) {
+				// every byte is a request for the next frame; 'F' also asks for it whole
+				// (BeamNG lost tiles, e.g. it paused longer than the tile files live)
+				int b;
+				while ((b = in.read()) != -1) {
+					if (b == 'F') needFullFrame = true;
 					RAW_REQUESTS.incrementAndGet();
 				}
 				RAW_CLIENTS.remove(s);
