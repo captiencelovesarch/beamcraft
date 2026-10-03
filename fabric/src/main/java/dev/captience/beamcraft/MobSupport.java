@@ -35,6 +35,58 @@ public final class MobSupport {
 	private static final double RANGE = 48;
 
 	private static int timer;
+	/** /beamcraft mobs on|off, saved per world in beamcraft_mobs.txt */
+	private static volatile boolean spawning = true;
+	private static final String SPAWNED_TAG = "beamcraft_spawned";
+
+	public static void load(MinecraftServer server) {
+		try {
+			java.nio.file.Path f = server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT).resolve("beamcraft_mobs.txt");
+			spawning = !java.nio.file.Files.exists(f) || !java.nio.file.Files.readString(f).trim().equals("off");
+		} catch (java.io.IOException e) {
+			spawning = true;
+		}
+	}
+
+	/** Turns BeamCraft's spawner on or off; off also removes the mobs it spawned. */
+	public static int setSpawning(MinecraftServer server, boolean on) {
+		spawning = on;
+		pending = null;
+		try {
+			java.nio.file.Path f = server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT).resolve("beamcraft_mobs.txt");
+			java.nio.file.Files.writeString(f, on ? "on" : "off");
+		} catch (java.io.IOException ignored) {
+		}
+		int removed = 0;
+		if (!on) {
+			for (ServerLevel level : server.getAllLevels()) {
+				for (var e : level.getAllEntities()) {
+					if (e instanceof Mob mob && mob.entityTags().contains(SPAWNED_TAG) && !mob.hasCustomName()) {
+						mob.discard();
+						removed++;
+					}
+				}
+			}
+		}
+		return removed;
+	}
+
+	public static void registerCommand() {
+		net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register((dispatcher, registry, env) ->
+			dispatcher.register(net.minecraft.commands.Commands.literal("beamcraft")
+				.then(net.minecraft.commands.Commands.literal("mobs")
+					.then(net.minecraft.commands.Commands.literal("on").executes(ctx -> {
+						setSpawning(ctx.getSource().getServer(), true);
+						ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal("BeamCraft mob spawning on"), false);
+						return 1;
+					}))
+					.then(net.minecraft.commands.Commands.literal("off").executes(ctx -> {
+						int n = setSpawning(ctx.getSource().getServer(), false);
+						ctx.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+							"BeamCraft mob spawning off (" + n + " spawned mobs removed)"), false);
+						return 1;
+					})))));
+	}
 	private static double[] pending; // x, z, y-hint, ticks waited
 	private static boolean pendingMonster;
 
@@ -47,7 +99,7 @@ public final class MobSupport {
 		ServerLevel level = player.level();
 		holdUnscanned(level, player);
 		if (Boolean.getBoolean("beamcraft.mobDebug") && timer % 100 == 0) debug(level, player);
-		if (++timer % 20 == 0) spawnTick(level, player);
+		if (++timer % 20 == 0 && spawning) spawnTick(level, player);
 	}
 
 	private static void debug(ServerLevel level, ServerPlayer player) {
@@ -185,6 +237,7 @@ public final class MobSupport {
 		if (!level.noCollision(mob)) return;
 		BlockPos pos = BlockPos.containing(x, y, z);
 		mob.finalizeSpawn(level, level.getCurrentDifficultyAt(pos), EntitySpawnReason.NATURAL, null);
+		mob.addTag(SPAWNED_TAG);
 		level.addFreshEntityWithPassengers(mob);
 	}
 }

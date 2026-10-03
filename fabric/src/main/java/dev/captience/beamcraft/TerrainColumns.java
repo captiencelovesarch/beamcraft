@@ -87,6 +87,30 @@ public final class TerrainColumns {
 		return y + 0.5 < h && y + 1 > h - DEPTH;
 	}
 
+	/**
+	 * BeamNG ground inside block cell pos, as a shape relative to the cell (for
+	 * raycasts, which test one cell at a time). Empty if none.
+	 */
+	public static VoxelShape cellShape(int bx, int by, int bz) {
+		if (!enabled || HEIGHTS.isEmpty()) return Shapes.empty();
+		double r = res;
+		VoxelShape out = Shapes.empty();
+		int i0 = Mth.floor(bx / r), i1 = Mth.floor((bx + 1 - 1e-6) / r);
+		int k0 = Mth.floor(bz / r), k1 = Mth.floor((bz + 1 - 1e-6) / r);
+		for (int i = i0; i <= i1; i++) {
+			for (int k = k0; k <= k1; k++) {
+				Float h = HEIGHTS.get(key(i, k));
+				if (h == null || h <= NONE + 1) continue;
+				double top = Math.min(1, h - by), bottom = Math.max(0, h - DEPTH - by);
+				if (top <= 0 || bottom >= 1 || top <= bottom) continue;
+				double x0 = Math.max(0, i * r - bx), x1 = Math.min(1, (i + 1) * r - bx);
+				double z0 = Math.max(0, k * r - bz), z1 = Math.min(1, (k + 1) * r - bz);
+				out = Shapes.or(out, Shapes.box(x0, bottom, z0, x1, top, z1));
+			}
+		}
+		return out;
+	}
+
 	public static boolean appliesTo(Level level) {
 		return enabled && level.dimension() == Level.OVERWORLD;
 	}

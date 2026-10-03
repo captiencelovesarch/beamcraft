@@ -31,8 +31,10 @@ public class BeamCraft implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		VehicleTargets.register();
+		MobSupport.registerCommand();
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			BlockSync.onServerStarted(server);
+			MobSupport.load(server);
 			applyWorldRules(server);
 		});
 		ServerLifecycleEvents.SERVER_STOPPING.register(BlockSync::onServerStopping);

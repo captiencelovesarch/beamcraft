@@ -9,7 +9,8 @@
 		"ServerPlayerGameModeMixin",
 		"PathfindingContextMixin",
 		"PathNavigationMixin",
-		"LivingEntitySounds"
+		"LivingEntitySounds",
+		"ClipContextAccess"
 	],
 	"injectors": {
 		"defaultRequire": 1
