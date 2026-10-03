@@ -454,7 +454,9 @@ handlers.vehUse = function(m)
     M.inCar = true -- Steve got in: don't leave him standing outside
   end
 end
-handlers.boom = function(m) vehicles.explode(m.x, m.y, m.z, m.r or 4, now) end
+handlers.boom = function(m)
+  if m.wind then vehicles.gust(m.x, m.y, m.z, m.r or 1.2) else vehicles.explode(m.x, m.y, m.z, m.r or 4, now) end
+end
 
 handlers.p = function(m)
   if m.armorModel then player.setArmor(m.armorModel) end

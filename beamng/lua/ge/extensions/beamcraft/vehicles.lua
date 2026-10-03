@@ -119,6 +119,7 @@ function M.checkMobHits(now, mobs)
           local kx, ky, kz = v.x * 1.2, v.y * 1.2, v.z + 4 + speed * 0.2
           local mx, my, mz = coords.bngToMc(kx, ky, kz)
           out[#out + 1] = { t = 'mobHit', id = mob.id, dmg = (speed - M.hitSpeed) * 2.0, vx = mx, vy = my, vz = mz }
+          M.clank(veh, vec3(bx, by, bz), speed / 20)
         end
       end
     end
@@ -159,6 +160,22 @@ if br > 0 then
 end
 ]]
 
+-- the car's own metal impact sound, from the node nearest the hit
+local CLANK = [[
+local hp = vec3(%f, %f, %f) local vol = %f
+local pos = obj:getPosition() local best, bd = nil, 1e9
+for _, n in pairs(v.data.nodes) do
+  local d = (pos + obj:getNodePosition(n.cid) - hp):squaredLength()
+  if d < bd then bd, best = d, n.cid end
+end
+if best and sounds and sounds.playSoundOnceFollowNode then
+  sounds.playSoundOnceFollowNode("event:>Destruction>Vehicle>vehicle_part_impact", best, vol)
+end
+]]
+function M.clank(veh, pos, vol)
+  veh:queueLuaCommand(string.format(CLANK, pos.x, pos.y, pos.z, math.max(0.05, math.min(1, vol))))
+end
+
 ------------------------------------------------------------------------------
 -- explosions
 ------------------------------------------------------------------------------
@@ -195,6 +212,36 @@ function M.explode(x, y, z, r, now)
   end)
 end
 
+-- A wind charge: no damage, a shove. Vanilla knocks entities back within 2x the
+-- radius; cars get the whole body pushed away from the burst (and a bit up), so
+-- they slide, hop or tip rather than crumple.
+M.gustStrength = 14       -- m/s for a car right at the burst
+function M.gust(x, y, z, r)
+  local bx, by, bz = coords.mcToBng(x, y, z)
+  local c = vec3(bx, by, bz)
+  local reach = math.max(3, r * 2.5)
+  eachVehicle(function(veh)
+    local vc, ax, he = oobbParts(veh)
+    -- distance from the burst to the car's box, not its centre
+    local d = c - vc
+    local local_ = { d:dot(ax[1]), d:dot(ax[2]), d:dot(ax[3]) }
+    local hev = { he.x, he.y, he.z }
+    local out = 0
+    for i = 1, 3 do
+      local e = math.max(0, math.abs(local_[i]) - hev[i])
+      out = out + e * e
+    end
+    local dist = math.sqrt(out)
+    if dist > reach then return end
+    local falloff = 1 - dist / reach
+    local dir = (vc - c)
+    dir = (dir:length() > 0.01 and dir:normalized() or vec3(0, 0, 1)) + vec3(0, 0, 0.6)
+    dir = dir:normalized() * (M.gustStrength * falloff)
+    veh:applyClusterVelocityScaleAdd(veh:getRefNodeId(), 1, dir.x, dir.y, dir.z)
+    M.clank(veh, c, 0.3 * falloff)
+  end)
+end
+
 -- A successful vanilla combat hit. m.dmg is Minecraft's final damage for the swing:
 -- weapon, attack cooldown, crits, Sharpness/Smite, mace fall bonus all included
 -- (fist 1, iron sword 6, netherite axe 10, a mace smash can be 30+).
@@ -218,6 +265,7 @@ function M.hit(m, now, eye)
   local radius = math.min(1.8, M.dentRadiusBase + damage * M.dentRadiusPerDamage)
   local dv = math.min(300, 6 + damage * M.dentPerDamage)
   local tear = damage >= M.tearFromDamage and math.min(0.6, damage * M.tearRadiusPerDamage) or 0
+  M.clank(veh, vec3(x, y, z), 0.15 + damage / 40)
   eye = eye or vec3(x, y, z) - vec3(dx, dy, dz) * 2
   veh:queueLuaCommand(string.format(DENT, eye.x, eye.y, eye.z, dx, dy, dz, x, y, z, radius, dv, tear))
 end

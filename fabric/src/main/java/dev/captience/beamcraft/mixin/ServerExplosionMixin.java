@@ -24,6 +24,8 @@ public abstract class ServerExplosionMixin {
 		o.addProperty("y", c.y);
 		o.addProperty("z", c.z);
 		o.addProperty("r", self.radius());
+		// wind charges (and breezes) are gusts: they only trigger blocks, never break them
+		if (self.getBlockInteraction() == net.minecraft.world.level.Explosion.BlockInteraction.TRIGGER_BLOCK) o.addProperty("wind", true);
 		Bridge.send(o);
 	}
 }
