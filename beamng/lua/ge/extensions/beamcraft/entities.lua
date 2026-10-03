@@ -237,6 +237,18 @@ function M.clear()
   ents = {}
 end
 
+-- mobs (and other modelled entities) for car hits: { id, x, y, z (MC feet), w, h }
+function M.mobList()
+  local out = {}
+  for id, ent in pairs(ents) do
+    if ent.kind == 'm' then
+      local c = ent.cur
+      out[#out + 1] = { id = id, x = c[1], y = c[2], z = c[3], w = ent.w or 0.6, h = ent.h or 1.8 }
+    end
+  end
+  return out
+end
+
 -- living mobs' feet (MC coords), for sampling the ground under them
 function M.mobFeet()
   local out = {}

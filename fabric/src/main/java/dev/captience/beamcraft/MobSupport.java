@@ -62,17 +62,53 @@ public final class MobSupport {
 		}
 	}
 
+	// mobs we took gravity away from while the ground under them is unknown
+	private static final java.util.Set<Mob> HELD = java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
 	private static void holdUnscanned(ServerLevel level, ServerPlayer player) {
+		for (var it = HELD.iterator(); it.hasNext();) {
+			Mob mob = it.next();
+			if (mob.isRemoved() || TerrainColumns.hasGroundAt(mob.getX(), mob.getZ())) {
+				mob.setNoGravity(false);
+				it.remove();
+			}
+		}
 		List<Mob> mobs = level.getEntitiesOfClass(Mob.class, player.getBoundingBox().inflate(128));
 		for (Mob mob : mobs) {
-			if (mob.isNoGravity() || mob.isPassenger() || !(mob.getNavigation() instanceof GroundPathNavigation)) continue;
-			if (mob.onGround() || mob.isInWater()) continue;
-			if (TerrainColumns.hasGroundAt(mob.getX(), mob.getZ())) continue;
-			// nothing known under it yet: don't let it fall through BeamNG's ground
+			if (mob instanceof VehicleTargets.Target) continue;
+			// fell through into the void below BeamNG's world: gone, like vanilla's void
+			if (mob.getY() < player.getY() - 24 && !mob.onGround()) {
+				mob.discard();
+				continue;
+			}
+			if (HELD.contains(mob) || mob.isNoGravity() || mob.isPassenger() || !(mob.getNavigation() instanceof GroundPathNavigation)) continue;
+			if (mob.isInWater() || TerrainColumns.hasGroundAt(mob.getX(), mob.getZ())) continue;
+			// nothing known under it yet: float in place until BeamNG has sampled there
+			// (zeroing velocity after the tick was not enough: gravity still sank it
+			// 0.08 m a tick, right through the ground once that arrived)
+			mob.setNoGravity(true);
 			Vec3 v = mob.getDeltaMovement();
 			mob.setDeltaMovement(0, Math.max(0, v.y), 0);
 			mob.fallDistance = 0;
+			HELD.add(mob);
 		}
+	}
+
+	/** A BeamNG car hit an entity: vehicle damage and a launch, like Steve gets. */
+	public static void carHit(MinecraftServer server, int id, float dmg, double vx, double vy, double vz) {
+		server.execute(() -> {
+			for (ServerLevel level : server.getAllLevels()) {
+				var e = level.getEntity(id);
+				if (!(e instanceof net.minecraft.world.entity.LivingEntity le) || e instanceof VehicleTargets.Target) continue;
+				var type = level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.DAMAGE_TYPE)
+					.getOrThrow(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.DAMAGE_TYPE,
+						net.minecraft.resources.Identifier.fromNamespaceAndPath("beamcraft", "vehicle")));
+				le.hurtServer(level, new net.minecraft.world.damagesource.DamageSource(type), dmg);
+				le.setDeltaMovement(le.getDeltaMovement().add(vx / 20.0, vy / 20.0, vz / 20.0));
+				le.hurtMarked = true;
+				return;
+			}
+		});
 	}
 
 	private static void spawnTick(ServerLevel level, ServerPlayer player) {

@@ -93,6 +93,39 @@ function M.checkHits(now, steveB)
   return msg
 end
 
+-- mobs = entities.mobList(); returns 'mobHit' messages for mobs a moving car hit
+local mobCooldown = {}
+function M.checkMobHits(now, mobs)
+  local out = {}
+  if #mobs == 0 then return out end
+  eachVehicle(function(veh)
+    local v = veh:getVelocity()
+    local speed = v:length()
+    if speed < M.hitSpeed then return end
+    local c, ax, he = oobbParts(veh)
+    local hev = { he.x, he.y, he.z }
+    for _, mob in ipairs(mobs) do
+      local bx, by, bz = coords.mcToBng(mob.x, mob.y + mob.h / 2, mob.z)
+      local d = vec3(bx, by, bz) - c
+      if d:length() < 12 then
+        local inside = true
+        for i = 1, 3 do
+          local margin = math.abs(ax[i].z) > 0.7 and mob.h / 2 or mob.w / 2 + 0.1
+          if math.abs(d:dot(ax[i])) > hev[i] + margin then inside = false break end
+        end
+        local key = veh:getID() .. ':' .. mob.id
+        if inside and now - (mobCooldown[key] or -10) > 0.5 then
+          mobCooldown[key] = now
+          local kx, ky, kz = v.x * 1.2, v.y * 1.2, v.z + 4 + speed * 0.2
+          local mx, my, mz = coords.bngToMc(kx, ky, kz)
+          out[#out + 1] = { t = 'mobHit', id = mob.id, dmg = (speed - M.hitSpeed) * 2.0, vx = mx, vy = my, vz = mz }
+        end
+      end
+    end
+  end)
+  return out
+end
+
 ------------------------------------------------------------------------------
 -- punching cars
 ------------------------------------------------------------------------------

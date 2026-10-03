@@ -289,6 +289,10 @@ public class BeamCraftClient implements ClientModInitializer {
 			case "time" -> setTimeOfDay(mc, num(m, "tod"));
 			case "oin" -> OverlayServer.INPUT.add(m.getAsJsonObject("e")); // overlay input relayed by BeamNG's Lua
 			case "hurt" -> onHurt(mc, m);
+			case "mobHit" -> {
+				if (mc.getSingleplayerServer() != null) dev.captience.beamcraft.MobSupport.carHit(mc.getSingleplayerServer(),
+					m.get("id").getAsInt(), (float) num(m, "dmg"), num(m, "vx"), num(m, "vy"), num(m, "vz"));
+			}
 			case "veh" -> {
 				java.util.List<net.minecraft.world.phys.AABB> boxes = new java.util.ArrayList<>();
 				for (JsonElement e : m.getAsJsonArray("b")) {

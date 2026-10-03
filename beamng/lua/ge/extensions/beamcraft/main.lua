@@ -557,20 +557,30 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   entities.update(now)
   particles.update(now)
 
+  if net.isConnected() and ready and pose then
+    -- ground under the mobs, so they walk on BeamNG's world too (also while you
+    -- drive). Mobs far below Steve have fallen into the void: sampling from there
+    -- would report some lower layer as "the ground" for everyone.
+    mobGroundTimer = mobGroundTimer + dtReal
+    if mobGroundTimer > 0.2 then
+      mobGroundTimer = 0
+      for _, feet in ipairs(entities.mobFeet()) do
+        if feet[2] > pose.y - 8 then
+          local mt = terrain.around(feet[1], feet[2], feet[3], 7)
+          if mt then net.send(mt) end
+        end
+      end
+    end
+    -- cars hitting mobs
+    for _, hit in ipairs(vehicles.checkMobHits(now, entities.mobList())) do net.send(hit) end
+  end
+
   if active and net.isConnected() and pose then
     local fx, fy, fz = pose.x, pose.y, pose.z
     -- terrain under Steve
     local ter = terrain.update(fx, fy, fz)
     if ter then net.send(ter) end
-    -- ground under the mobs, so they walk on BeamNG's world too
-    mobGroundTimer = mobGroundTimer + dtReal
-    if mobGroundTimer > 0.2 then
-      mobGroundTimer = 0
-      for _, feet in ipairs(entities.mobFeet()) do
-        local mt = terrain.around(feet[1], feet[2], feet[3], 7)
-        if mt then net.send(mt) end
-      end
-    end
+
 
     -- cars: solid to Steve (10 Hz), and they hurt
     local feetB = vec3(coords.mcToBng(fx, fy, fz))
