@@ -24,7 +24,8 @@
 		"LivingEntityRendererAccess",
 		"AgeableMobRendererAccess",
 		"ModelPartAccess",
-		"SoundEngineMixin"
+		"SoundEngineMixin",
+		"TextureAtlasAccess"
 	],
 	"injectors": {
 		"defaultRequire": 1

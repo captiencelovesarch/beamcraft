@@ -291,6 +291,7 @@ public class BeamCraftClient implements ClientModInitializer {
 		String t = m.get("t").getAsString();
 		switch (t) {
 			case "_connect" -> {
+				ParticleExport.resetWarm();
 				ItemExport.reset();
 				EntityModelExport.reset();
 				sentStates.clear();
@@ -593,6 +594,7 @@ public class BeamCraftClient implements ClientModInitializer {
 			sendPose(mc, p);
 			sendHud(mc, p);
 			sendEntities(mc, p);
+			ParticleExport.warmUp(mc, userPath == null ? null : userPath.resolve("beamcraft/render"));
 			ParticleExport.send(mc, userPath == null ? null : userPath.resolve("beamcraft/render"));
 		}
 		flushBlocks();

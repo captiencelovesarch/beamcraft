@@ -414,6 +414,36 @@ handlers.itemModel = function(m) items.define(m) end
 handlers.particles = function(m) particles.snapshot(m, now) end
 handlers.mobModel = function(m) entities.defineModel(m) end
 
+-- Textures to load ahead of use (every particle sprite). BeamNG converts a texture
+-- to DDS the first time a material draws it and shows a placeholder meanwhile, so we
+-- draw them all once, tiny, right in front of the camera for a few seconds.
+-- (The converted files stay in BeamNG's temp cache across sessions.)
+local warm
+handlers.warm = function(m)
+  if warm then mu.deleteObject(warm.obj) warm = nil end
+  local meshes = {}
+  for i, pair in ipairs(m.l or {}) do
+    local mat = mu.textureMaterial('bc_warm_' .. pair[1]:gsub('[^%w]', '_'), pair[1], 'translucent', nil, pair[2], true)
+    local mesh = mu.newMesh(mat)
+    local x = (i % 20) * 0.002 - 0.02
+    local z = math.floor(i / 20) * 0.002 - 0.02
+    mu.addQuad(mesh, { x, 0, z + 0.0015 }, { x + 0.0015, 0, z + 0.0015 }, { x + 0.0015, 0, z }, { x, 0, z }, 0, 0, 1, 1, 0, -1, 0)
+    meshes[#meshes + 1] = mesh
+  end
+  if #meshes == 0 then return end
+  mu.flushMaterials()
+  warm = { obj = mu.newObject('beamcraft_warm', meshes), untilT = now + 6 }
+  log('I', 'beamcraft', 'warming ' .. #meshes .. ' particle textures')
+end
+local function updateWarm()
+  if not warm then return end
+  if now > warm.untilT then mu.deleteObject(warm.obj) warm = nil return end
+  local cam, fwd = core_camera.getPosition(), core_camera.getForward()
+  local p = cam + fwd * 0.35
+  local yaw = math.atan2(fwd.x, fwd.y)
+  mu.setXform(warm.obj, p.x, p.y, p.z, mu.qaxis(0, 0, 1, -yaw))
+end
+
 -- a Minecraft sound BeamNG should play (e.g. a mob your car hit, far from Steve)
 local sounds = {}
 handlers.sound = function(m)
@@ -658,6 +688,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     drawTarget()
   end
 
+  updateWarm()
   if active then overlay.draw() end
   hud.drawStatus(statusLines())
 end

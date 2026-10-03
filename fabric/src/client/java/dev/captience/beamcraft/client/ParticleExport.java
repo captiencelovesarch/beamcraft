@@ -9,6 +9,30 @@ import net.minecraft.client.particle.SingleQuadParticle;
 /** Vanilla owns emission, collision, colours, sprite frames, size and lifetime. */
 final class ParticleExport {
     private static boolean hadParticles;
+    private static Path warmed;
+
+    /**
+     * Every particle sprite, exported up front and listed to BeamNG: it converts a
+     * texture to DDS the first time a material uses it and shows a placeholder until
+     * that's done - short-lived particles (explosions) used to be gone by then.
+     */
+    static void resetWarm() { warmed = null; }
+
+    static void warmUp(Minecraft mc, Path root) {
+        if (root == null || root.equals(warmed)) return;
+        var tex = mc.getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_PARTICLES);
+        if (!(tex instanceof net.minecraft.client.renderer.texture.TextureAtlas atlas)) return;
+        warmed = root;
+        JsonArray list = new JsonArray();
+        for (var sprite : ((TextureAtlasAccess) atlas).beamcraft$sprites()) {
+            try {
+                var t = RenderAssets.sprite(mc, root, sprite, -1);
+                if (t == null) continue;
+                JsonArray pair = new JsonArray(); pair.add(t.color()); pair.add(t.mask()); list.add(pair);
+            } catch (Exception ignored) {}
+        }
+        JsonObject m = new JsonObject(); m.addProperty("t", "warm"); m.add("l", list); Bridge.send(m);
+    }
     static void send(Minecraft mc, Path root) {
         if(mc.level==null || mc.player==null || root==null) return;
         JsonArray list=new JsonArray();
