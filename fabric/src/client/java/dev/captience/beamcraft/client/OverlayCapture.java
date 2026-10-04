@@ -29,15 +29,19 @@ import org.slf4j.LoggerFactory;
  * the part that changed to BeamNG, which draws it over the game with imgui.
  *
  * BeamNG's Chromium UI tops out well below the game's frame rate (measured ~37 fps
- * while the game ran at 104), so frames don't go through it. Instead every changed
- * 128 px tile is written as an uncompressed DDS file into a RAM disk that BeamNG sees
- * at /beamcraft/ov (a symlink in its userfolder), and the frame message on the raw
- * socket only names the files:
+ * while the game ran at 104), so frames don't go through it. Instead the changed
+ * 128 px tiles of a frame are packed into one atlas PNG (cells of 130 px: each tile
+ * with a 1 px apron of its neighbours) in a RAM disk that BeamNG sees at
+ * /beamcraft/ov (a symlink in its userfolder), and the frame message on the raw
+ * socket says where each tile went:
  *
- *   "W,H,T,full;tx,ty,name;tx,ty,-;..."   (name = file in /beamcraft/ov, '-' = empty tile)
+ *   "W,H,T,full,atlas,cols;tx,ty,k;tx,ty,-;..."   (k = cell index in the atlas,
+ *                                                   '-' = empty tile, atlas '-' = none)
  *
- * BeamNG loads a tile file as a texture in well under a millisecond. Files are deleted
- * a few seconds later; BeamNG has them on the GPU by then.
+ * One file per frame, not one per tile: BeamNG's texture load is mostly fixed cost
+ * (measured: 1 tile 0.8 ms, a 56-tile atlas 4 ms), and an enchanted item's glint in
+ * first person changes ~50 tiles every frame. Files are deleted a few seconds later;
+ * BeamNG has them on the GPU by then.
  */
 public final class OverlayCapture {
 	private static final Logger LOG = LoggerFactory.getLogger("BeamCraft/Overlay");
@@ -67,7 +71,9 @@ public final class OverlayCapture {
 	// encoder-thread state
 	private static int[] prev;
 	private static int prevW, prevH;
-	private static final ByteBuffer tileBuf = ByteBuffer.allocateDirect(4096 + (1 + (TILE + 2) * 4) * (TILE + 2));
+	private static ByteBuffer pngBuf = ByteBuffer.allocateDirect(1 << 20);
+	private static byte[] rawBuf = new byte[1 << 20];
+	private static final int CELL = TILE + 2;
 
 	private OverlayCapture() {}
 
@@ -191,9 +197,10 @@ public final class OverlayCapture {
 		if (full) OverlayServer.needFullFrame = false;
 		int[] old = full ? null : prev;
 
-		StringBuilder msg = new StringBuilder(256);
-		msg.append(w).append(',').append(h).append(',').append(TILE).append(',').append(full ? 1 : 0);
+		StringBuilder entries = new StringBuilder(256);
 		int tilesX = (w + TILE - 1) / TILE, tilesY = (h + TILE - 1) / TILE;
+		int[] packed = new int[tilesX * tilesY];
+		int n = 0;
 		for (int ty = 0; ty < tilesY; ty++) {
 			int y0 = ty * TILE, y1 = Math.min(h, y0 + TILE);
 			for (int tx = 0; tx < tilesX; tx++) {
@@ -201,11 +208,20 @@ public final class OverlayCapture {
 				if (!full && !tileChanged(cur, old, w, h, x0, y0, x1, y1)) continue;
 				boolean empty = isEmpty(cur, w, h, x0, y0, x1, y1);
 				if (full && empty) continue; // BeamNG starts from a clear screen
-				msg.append(';').append(tx).append(',').append(ty).append(',');
-				if (empty) msg.append('-');
-				else msg.append(writeTile(cur, w, h, x0, y0, x1 - x0, y1 - y0));
+				entries.append(';').append(tx).append(',').append(ty).append(',');
+				if (empty) {
+					entries.append('-');
+				} else {
+					entries.append(n);
+					packed[n++] = ty * tilesX + tx;
+				}
 			}
 		}
+		int cols = Math.max(1, (int) Math.ceil(Math.sqrt(n)));
+		String atlas = n == 0 ? "-" : writeAtlas(cur, w, h, tilesX, packed, n, cols);
+		StringBuilder msg = new StringBuilder(64 + entries.length());
+		msg.append(w).append(',').append(h).append(',').append(TILE).append(',').append(full ? 1 : 0)
+			.append(',').append(atlas).append(',').append(cols).append(entries);
 		if (prev != null) POOL.add(prev);
 		prev = cur;
 		prevW = w;
@@ -241,58 +257,67 @@ public final class OverlayCapture {
 	}
 
 	/**
-	 * One tile as a PNG with stored (uncompressed) deflate blocks: BeamNG loads it in
-	 * ~0.1 ms. (Uncompressed DDS loaded faster still, but BeamNG logged two warnings per
-	 * file, which filled its log within minutes.) Colour is un-premultiplied for imgui's
-	 * straight-alpha blending.
+	 * The frame's changed tiles packed into one PNG with stored (uncompressed) deflate
+	 * blocks, cols cells per row, cell k at (k % cols, k / cols). Each cell holds its
+	 * tile plus a 1 px apron of the neighbouring pixels (edge pixels repeated at the
+	 * frame border): BeamNG samples with filtering, which drew seams between tiles when
+	 * a tile's edge blended with whatever lay next to it. Colour is un-premultiplied for
+	 * imgui's straight-alpha blending.
 	 */
-	private static String writeTile(int[] cur, int w, int h, int x0, int y0, int tw0, int th0) throws IOException {
-		// a 1 px apron of the neighbouring pixels (edge pixels repeated at the frame
-		// border): BeamNG samples with filtering and wrapping, which drew seams between
-		// tiles when each tile's edge blended with its own opposite edge
-		int tw = tw0 + 2, th = th0 + 2;
-		int rowLen = 1 + tw * 4;
+	private static String writeAtlas(int[] cur, int w, int h, int tilesX, int[] packed, int n, int cols) throws IOException {
+		int rows = (n + cols - 1) / cols;
+		int aw = cols * CELL, ah = rows * CELL;
+		int rowLen = 1 + aw * 4;
+		int rawLen = rowLen * ah;
+		if (rawBuf.length < rawLen) rawBuf = new byte[rawLen];
 		byte[] raw = rawBuf;
-		int p = 0;
-		for (int yy = y0 - 1; yy < y0 + th0 + 1; yy++) {
-			int y = Math.max(0, Math.min(h - 1, yy));
-			int row = (h - 1 - y) * w;
-			raw[p++] = 0; // filter: none
-			for (int xx = x0 - 1; xx < x0 + tw0 + 1; xx++) {
-				int c = cur[row + Math.max(0, Math.min(w - 1, xx))];
-				int a = c >>> 24;
-				int r = c & 0xFF, g = (c >>> 8) & 0xFF, bl = (c >>> 16) & 0xFF;
-				if (a > 0 && a < 255) {
-					r = Math.min(255, (r * 255 + a / 2) / a);
-					g = Math.min(255, (g * 255 + a / 2) / a);
-					bl = Math.min(255, (bl * 255 + a / 2) / a);
+		for (int r = 0; r < ah; r++) raw[r * rowLen] = 0; // filter: none
+		for (int k = 0; k < n; k++) {
+			int tx = packed[k] % tilesX, ty = packed[k] / tilesX;
+			int x0 = tx * TILE, y0 = ty * TILE;
+			int tw0 = Math.min(TILE, w - x0), th0 = Math.min(TILE, h - y0);
+			int cx = (k % cols) * CELL, cy = (k / cols) * CELL;
+			for (int yy = 0; yy < th0 + 2; yy++) {
+				int y = Math.max(0, Math.min(h - 1, y0 - 1 + yy));
+				int row = (h - 1 - y) * w;
+				int p = (cy + yy) * rowLen + 1 + cx * 4;
+				for (int xx = 0; xx < tw0 + 2; xx++) {
+					int c = cur[row + Math.max(0, Math.min(w - 1, x0 - 1 + xx))];
+					int a = c >>> 24;
+					int r = c & 0xFF, g = (c >>> 8) & 0xFF, bl = (c >>> 16) & 0xFF;
+					if (a > 0 && a < 255) {
+						r = Math.min(255, (r * 255 + a / 2) / a);
+						g = Math.min(255, (g * 255 + a / 2) / a);
+						bl = Math.min(255, (bl * 255 + a / 2) / a);
+					}
+					raw[p++] = (byte) r;
+					raw[p++] = (byte) g;
+					raw[p++] = (byte) bl;
+					raw[p++] = (byte) a;
 				}
-				raw[p++] = (byte) r;
-				raw[p++] = (byte) g;
-				raw[p++] = (byte) bl;
-				raw[p++] = (byte) a;
 			}
 		}
-		int rawLen = rowLen * th;
 		// zlib stream of stored blocks (max 65535 bytes each)
-		ByteBuffer b = tileBuf;
+		int blocks = (rawLen + 65534) / 65535;
+		int need = 64 + rawLen + blocks * 5;
+		if (pngBuf.capacity() < need) pngBuf = ByteBuffer.allocateDirect(need + (need >> 2));
+		ByteBuffer b = pngBuf;
 		b.clear();
 		b.order(ByteOrder.BIG_ENDIAN);
 		b.put(new byte[] {(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'});
 		int ihdr = b.position();
 		b.putInt(13).put((byte) 'I').put((byte) 'H').put((byte) 'D').put((byte) 'R')
-			.putInt(tw).putInt(th).put((byte) 8).put((byte) 6).put((byte) 0).put((byte) 0).put((byte) 0);
+			.putInt(aw).putInt(ah).put((byte) 8).put((byte) 6).put((byte) 0).put((byte) 0).put((byte) 0);
 		crc(b, ihdr + 4, b.position());
-		int blocks = (rawLen + 65534) / 65535;
 		int idatLen = 2 + rawLen + blocks * 5 + 4;
 		int idat = b.position();
 		b.putInt(idatLen).put((byte) 'I').put((byte) 'D').put((byte) 'A').put((byte) 'T');
 		b.put((byte) 0x78).put((byte) 0x01);
 		for (int off = 0; off < rawLen; off += 65535) {
-			int n = Math.min(65535, rawLen - off);
-			b.put((byte) (off + n >= rawLen ? 1 : 0));
-			b.put((byte) n).put((byte) (n >>> 8)).put((byte) ~n).put((byte) (~n >>> 8));
-			b.put(raw, off, n);
+			int len = Math.min(65535, rawLen - off);
+			b.put((byte) (off + len >= rawLen ? 1 : 0));
+			b.put((byte) len).put((byte) (len >>> 8)).put((byte) ~len).put((byte) (~len >>> 8));
+			b.put(raw, off, len);
 		}
 		ADLER.reset();
 		ADLER.update(raw, 0, rawLen);
@@ -302,8 +327,8 @@ public final class OverlayCapture {
 		b.putInt(0).put((byte) 'I').put((byte) 'E').put((byte) 'N').put((byte) 'D');
 		crc(b, iend + 4, b.position());
 		b.flip();
-		statTiles++;
-		String name = "t" + Long.toString(fileSeq++, 36) + ".png";
+		statTiles += n;
+		String name = "a" + Long.toString(fileSeq++, 36) + ".png";
 		Path file = tileDir.resolve(name);
 		try (FileChannel ch = FileChannel.open(file, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
 			while (b.hasRemaining()) ch.write(b);
@@ -314,7 +339,6 @@ public final class OverlayCapture {
 
 	private static final java.util.zip.CRC32 CRC = new java.util.zip.CRC32();
 	private static final java.util.zip.Adler32 ADLER = new java.util.zip.Adler32();
-	private static final byte[] rawBuf = new byte[(1 + (TILE + 2) * 4) * (TILE + 2)];
 
 	/** Append the CRC of bytes [from, to) of b (chunk type + data). */
 	private static void crc(ByteBuffer b, int from, int to) {

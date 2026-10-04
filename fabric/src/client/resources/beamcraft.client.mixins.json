@@ -3,6 +3,7 @@
 	"package": "dev.captience.beamcraft.client.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
+		"GlintClockMixin",
 		"AbstractClientPlayerMixin",
 		"FramerateLimitTrackerMixin",
 		"GameRendererMixin",

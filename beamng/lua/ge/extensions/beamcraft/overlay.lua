@@ -1,24 +1,22 @@
 -- Minecraft's GUI, first-person hand and screen effects, drawn over BeamNG with imgui.
 --
 -- The hidden Minecraft renders them over a transparent background. For each frame it
--- writes every changed 128 px tile as a small PNG file into /beamcraft/ov (a RAM disk
--- linked into the userfolder) and tells us on its raw socket (127.0.0.1:47802) which
--- files belong where:
---   u32 little-endian length, then "W,H,T,full;tx,ty,name;tx,ty,-;..."
--- We load each named file as a texture (well under a millisecond) and draw the whole
--- grid every BeamNG frame on imgui's foreground layer.
+-- packs every changed 128 px tile into one atlas PNG in /beamcraft/ov (a RAM disk
+-- linked into the userfolder) and tells us on its raw socket (127.0.0.1:47802) where
+-- each tile went:
+--   u32 little-endian length, then "W,H,T,full,atlas,cols;tx,ty,k;tx,ty,-;..."
+-- (k = cell in the atlas, cells of T+2 px with a 1 px apron). We load the atlas as one
+-- texture and draw the whole grid every BeamNG frame on imgui's foreground layer.
+--
+-- One file per frame because a texture load is mostly fixed cost: 0.8 ms for one
+-- tile, 4 ms for a 56-tile atlas. An enchanted item's glint in first person changes
+-- ~50 tiles every frame; loaded one by one that was 39 fps (109 in third person).
 --
 -- This used to go through BeamNG's Chromium UI, which tops out around 37 fps here no
 -- matter what the game runs at - that was the choppy HUD and hand.
 --
 -- Pull model: each byte we send asks for one frame ('F' = whole frame). Two requests
 -- may be in flight, so the next frame is usually already rendered when we want it.
---
--- Loading a tile costs ~0.3 ms, and some frames change dozens: an enchanted item's
--- glint in first person redraws ~50 tiles every frame (39 fps vs 109 in third
--- person). Tiles now load into each cell's back texture under a per-frame budget and
--- the finished frame swaps in at once (no torn hand); new frames are only requested
--- once the staged one is shown, so heavy churn slows the overlay, not the game.
 
 local socket = require('socket.socket')
 local sbuf = require('string.buffer')
@@ -42,21 +40,36 @@ local waitTime = 0
 local wantFull = false
 
 local grid = { w = 0, h = 0, t = 128 }
-local tiles = {}   -- [ty * 4096 + tx] = { tex =, back =, id =, x =, y = }
--- the frame being loaded: [key] = { tx, ty, name or '-', loaded }; merged when more
--- frames arrive before it's shown (the newest file per cell wins)
-local staged, stagedCount, stagedFull = {}, 0, false
-M.loadBudgetMs = 3.0
-local loadTimer = hptimer()
+local tiles = {}   -- [ty * 4096 + tx] = { atlas =, k =, x =, y = }
 
 local white = 0xFFFFFFFF
 
--- Each grid cell keeps one texture handle for good and re-points it at each new
--- file: creating a handle per tile left hundreds of finalizers for Lua's garbage
--- collector, which released them all at once in 50-80 ms hitches.
+-- Atlas textures, shared by the tiles drawn from them. Texture handles are kept and
+-- re-pointed at new files: creating one per load left hundreds of finalizers for
+-- Lua's garbage collector, which released them all at once in 50-80 ms hitches.
+local freeHandles = {}
+M.loadMs = 0
+
+local function release(atlas)
+  if not atlas then return end
+  atlas.refs = atlas.refs - 1
+  if atlas.refs <= 0 then freeHandles[#freeHandles + 1] = atlas.tex end
+end
+
+local function setTile(key, tx, ty, atlas, k)
+  local tile = tiles[key]
+  if not tile then
+    tile = { x = tx, y = ty }
+    tiles[key] = tile
+  end
+  if tile.atlas then release(tile.atlas) end
+  tile.atlas, tile.k = atlas, k
+  if atlas then atlas.refs = atlas.refs + 1 end
+end
+
 local function clearTiles()
-  for _, tile in pairs(tiles) do tile.shown = false end
-  staged, stagedCount, stagedFull = {}, 0, false
+  for key, tile in pairs(tiles) do release(tile.atlas) end
+  tiles = {}
 end
 M.clear = clearTiles
 
@@ -95,83 +108,53 @@ local function connect()
   return true
 end
 
+local loadTimer = hptimer()
+
+local function loadAtlas(name, cols)
+  local t0 = loadTimer:stop()
+  local tex = table.remove(freeHandles)
+  if tex then tex:setID(DIR .. name) else tex = im.ImTextureHandler(DIR .. name) end
+  local size = tex:getSize()
+  M.loadMs = M.loadMs + (loadTimer:stop() - t0)
+  if not size or size.x <= 0 then
+    freeHandles[#freeHandles + 1] = tex
+    return nil
+  end
+  return { tex = tex, id = tex:getID(), w = size.x, h = size.y, cols = cols, refs = 0 }
+end
+
 local function applyFrame(msg)
   local first = true
-  local okAll = true
+  local atlas, missing = nil, false
   for part in msg:gmatch('[^;]+') do
     if first then
       first = false
-      local w, h, t, full = part:match('^(%d+),(%d+),(%d+),(%d)$')
+      local w, h, t, full, name, cols = part:match('^(%d+),(%d+),(%d+),(%d),([^,]+),(%d+)$')
       if not w then return end
       w, h, t = tonumber(w), tonumber(h), tonumber(t)
-      if w ~= grid.w or h ~= grid.h or t ~= grid.t then clearTiles() end
-      -- a full frame replaces everything: cells it doesn't list go blank on swap
-      if full == '1' then staged, stagedCount, stagedFull = {}, 0, true end
+      if full == '1' or w ~= grid.w or h ~= grid.h or t ~= grid.t then clearTiles() end
       grid.w, grid.h, grid.t = w, h, t
+      if name ~= '-' then
+        atlas = loadAtlas(name, tonumber(cols))
+        -- the file is gone (we stalled longer than Minecraft keeps them)
+        if not atlas then missing = true end
+      end
     else
-      local tx, ty, name = part:match('^(%d+),(%d+),(.+)$')
+      local tx, ty, k = part:match('^(%d+),(%d+),(.+)$')
       if tx then
         tx, ty = tonumber(tx), tonumber(ty)
         local key = ty * 4096 + tx
-        local s = staged[key]
-        if not s then
-          s = {}
-          staged[key] = s
-          stagedCount = stagedCount + 1
+        if k == '-' or not atlas then
+          setTile(key, tx, ty, nil)
+        else
+          setTile(key, tx, ty, atlas, tonumber(k))
+          M.tilesLoaded = M.tilesLoaded + 1
         end
-        s.tx, s.ty, s.name, s.loaded = tx, ty, name, name == '-'
       end
     end
   end
-end
-
--- load staged tiles into back textures; true once every staged tile is loaded
-local function loadStaged()
-  local start = loadTimer:stop()
-  for key, s in pairs(staged) do
-    if not s.loaded then
-      if loadTimer:stop() - start >= M.loadBudgetMs then return false end
-      local tile = tiles[key]
-      if not tile then
-        tile = { x = s.tx, y = s.ty }
-        tiles[key] = tile
-      end
-      if not tile.back then
-        tile.back = im.ImTextureHandler(DIR .. s.name)
-      else
-        tile.back:setID(DIR .. s.name)
-      end
-      local size = tile.back:getSize()
-      s.loaded = true
-      s.ok = size and size.x > 0
-      s.w, s.h = s.ok and size.x or 0, s.ok and size.y or 0
-      M.tilesLoaded = M.tilesLoaded + 1
-    end
-  end
-  return true
-end
-
--- show the staged frame: swap every loaded back texture to the front
-local function swapStaged()
-  if stagedFull then
-    for key, tile in pairs(tiles) do if not staged[key] then tile.shown = false end end
-  end
-  local okAll = true
-  for key, s in pairs(staged) do
-    local tile = tiles[key]
-    if s.name == '-' then
-      if tile then tile.shown = false end
-    elseif s.ok then
-      tile.tex, tile.back = tile.back, tile.tex
-      tile.id, tile.w, tile.h, tile.shown = tile.tex:getID(), s.w, s.h, true
-    else
-      -- the file is gone (we stalled longer than Minecraft keeps them)
-      tile.shown = false
-      okAll = false
-    end
-  end
-  staged, stagedCount, stagedFull = {}, 0, false
-  if not okAll then wantFull = true end
+  if atlas and atlas.refs == 0 then freeHandles[#freeHandles + 1] = atlas.tex end
+  if missing then wantFull = true end
 end
 
 -- enabled: only pull frames while Steve is being played
@@ -213,16 +196,12 @@ function M.update(dt, enabled)
     applyFrame(msg)
   end
 
-  local ready = loadStaged()
-  if ready and (stagedCount > 0 or stagedFull) then swapStaged() end
-
   -- recover if a request got lost
   if pending > 0 then
     waitTime = waitTime + dt
     if waitTime > 0.5 then pending, waitTime = 0, 0 end
   end
-  -- ask for more only once the staged frame is up (Minecraft renders ahead otherwise)
-  while sock and pending < WINDOW and stagedCount == 0 do
+  while sock and pending < WINDOW do
     local sent = sock:send(wantFull and 'F' or 'N')
     if not sent then close() return end
     wantFull = false
@@ -242,14 +221,17 @@ function M.draw()
   local p0, p1 = im.ImVec2(0, 0), im.ImVec2(0, 0)
   local uv0, uv1 = im.ImVec2(0, 0), im.ImVec2(1, 1)
   for _, tile in pairs(tiles) do
-    if tile.shown then
-    -- each texture has a 1 px apron of its neighbours: draw only the inside
-    local x, y = tile.x * t, tile.y * t
-    p0.x, p0.y = ox + x * sx, oy + y * sy
-    p1.x, p1.y = ox + (x + tile.w - 2) * sx, oy + (y + tile.h - 2) * sy
-    uv0.x, uv0.y = 1 / tile.w, 1 / tile.h
-    uv1.x, uv1.y = (tile.w - 1) / tile.w, (tile.h - 1) / tile.h
-    im.ImDrawList_AddImage(dl, tile.id, p0, p1, uv0, uv1, white)
+    local atlas = tile.atlas
+    if atlas then
+      -- the tile's inside, without the 1 px apron around it in its atlas cell
+      local x, y = tile.x * t, tile.y * t
+      local tw, th = math.min(t, grid.w - x), math.min(t, grid.h - y)
+      local cx, cy = (tile.k % atlas.cols) * (t + 2) + 1, math.floor(tile.k / atlas.cols) * (t + 2) + 1
+      p0.x, p0.y = ox + x * sx, oy + y * sy
+      p1.x, p1.y = ox + (x + tw) * sx, oy + (y + th) * sy
+      uv0.x, uv0.y = cx / atlas.w, cy / atlas.h
+      uv1.x, uv1.y = (cx + tw) / atlas.w, (cy + th) / atlas.h
+      im.ImDrawList_AddImage(dl, atlas.id, p0, p1, uv0, uv1, white)
     end
   end
 end
