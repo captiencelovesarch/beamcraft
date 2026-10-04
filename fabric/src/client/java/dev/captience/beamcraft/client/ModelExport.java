@@ -53,9 +53,11 @@ import org.slf4j.LoggerFactory;
  *
  * Every sprite any block state uses (with its tint baked in, since BeamNG has no
  * per-vertex tint) is packed into 4096px atlas pages written to BeamNG's userfolder.
- * Sprites are upscaled 7x with nearest-neighbour so linear filtering keeps the
- * pixel-art look, and each cell has an 8px gutter of extended edge pixels so
- * mipmapping doesn't bleed neighbours in.
+ * Sprites are upscaled 16x with nearest-neighbour so linear filtering keeps the
+ * pixel-art look (BeamNG has no point sampling for materials), and each cell has an
+ * 8px gutter of extended edge pixels so mipmapping doesn't bleed neighbours in. 16x,
+ * not 7x: BeamNG's "Low" texture quality halves every texture, which left 3.5 texels
+ * per Minecraft pixel and visibly soft blocks up close.
  *
  * Per block state we export its quads: cull face, facing, render layer, atlas page,
  * four block-local positions and four page UVs. BeamNG meshes from those.
@@ -64,9 +66,9 @@ public final class ModelExport {
 	private static final Logger LOG = LoggerFactory.getLogger("BeamCraft/ModelExport");
 
 	static final int PAGE = 4096;
-	static final int CELL = 128;
+	static final int CELL = 272;
 	static final int PAD = 8;
-	static final int CONTENT = CELL - 2 * PAD; // 112 = 16 * 7
+	static final int CONTENT = CELL - 2 * PAD; // 256 = 16 * 16
 	static final int PER_ROW = PAGE / CELL;
 	static final int PER_PAGE = PER_ROW * PER_ROW;
 	static final int FORMAT_VERSION = 1;
@@ -356,18 +358,19 @@ public final class ModelExport {
 			return;
 		}
 		long t0 = System.nanoTime();
-		BufferedImage[] images = new BufferedImage[pages];
-		for (int p = 0; p < pages; p++) images[p] = new BufferedImage(PAGE, PAGE, BufferedImage.TYPE_INT_ARGB);
+		// one page in memory at a time (64 MB each)
 		Map<Identifier, BufferedImage> cache = new HashMap<>();
-		for (Map.Entry<String, Tile> e : tiles.entrySet()) {
-			TileSrc src = sources.get(e.getKey());
-			Tile t = e.getValue();
-			BufferedImage img = cache.computeIfAbsent(src.sprite, id -> loadSprite(resources, id));
-			blitTile(images[t.page], t, img, src);
-		}
 		for (int p = 0; p < pages; p++) {
+			BufferedImage image = new BufferedImage(PAGE, PAGE, BufferedImage.TYPE_INT_ARGB);
+			for (Map.Entry<String, Tile> e : tiles.entrySet()) {
+				Tile t = e.getValue();
+				if (t.page != p) continue;
+				TileSrc src = sources.get(e.getKey());
+				BufferedImage img = cache.computeIfAbsent(src.sprite, id -> loadSprite(resources, id));
+				blitTile(image, t, img, src);
+			}
 			Path tmp = dir.resolve(hash + "_" + p + ".png.tmp");
-			ImageIO.write(images[p], "png", tmp.toFile());
+			ImageIO.write(image, "png", tmp.toFile());
 			Files.move(tmp, dir.resolve(hash + "_" + p + ".color.png"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
 		}
 		Files.writeString(dir.resolve(hash + ".txt"), String.join("\n", tiles.keySet()), StandardCharsets.UTF_8);

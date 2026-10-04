@@ -167,7 +167,7 @@ public final class GuiExport {
 		String layerType = slot == EquipmentSlot.LEGS ? "humanoid_leggings" : "humanoid";
 		DyedItemColor dye = stack.get(DataComponents.DYED_COLOR);
 		String color = dye == null ? "default" : Integer.toHexString(dye.rgb() & 0xFFFFFF);
-		String base = (asset.getNamespace() + "_" + asset.getPath() + "_" + layerType + "_" + color)
+		String base = (asset.getNamespace() + "_" + asset.getPath() + "_" + layerType + "_" + color + "_x16")
 			.replaceAll("[^A-Za-z0-9_-]", "_");
 		Path file = dir.resolve(base + ".color.png");
 		Path mask = dir.resolve(base + "_opacity.data.png");
@@ -176,8 +176,9 @@ public final class GuiExport {
 				BufferedImage image = composeArmor(mc.getResourceManager(), asset, layerType, dye);
 				if (image == null) return null;
 				Files.createDirectories(dir);
-				write(upscale(image, 4), file);
-				write(upscale(opacityMask(image), 4), mask);
+				// 16x like mobs: BeamNG filters linearly (and may halve textures)
+				write(upscale(image, 16), file);
+				write(upscale(opacityMask(image), 16), mask);
 			}
 			JsonObject result = new JsonObject();
 			result.addProperty("texture", "/beamcraft/armor/" + file.getFileName());

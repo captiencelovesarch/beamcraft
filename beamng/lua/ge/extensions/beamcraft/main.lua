@@ -514,7 +514,11 @@ handlers.p = function(m)
   if m.armorModel then player.setArmor(m.armorModel) end
   prevSnap = curSnap
   m.at = now
-  m.eye = m.eye or 1.62
+  -- Vanilla's camera eases toward the eye height, half the remaining way per tick
+  -- (Camera.tick); the raw value snapped a crouch's 0.35 m drop into one tick.
+  local eye = m.eye or 1.62
+  if prevSnap and prevSnap.eye then eye = prevSnap.eye + (eye - prevSnap.eye) * 0.5 end
+  m.eye = eye
   curSnap = m
   if prevSnap then
     -- teleports (respawn, /tp) should snap, not glide

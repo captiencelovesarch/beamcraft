@@ -31,10 +31,14 @@ final class RenderAssets {
             if(tint != -1) c = (a<<24) | (((c>>16 & 255)*(tint>>16 &255)/255)<<16) | (((c>>8 &255)*(tint>>8 &255)/255)<<8) | ((c&255)*(tint&255)/255);
             image.setRGB(x,y,c); mask.setRGB(x,y,0xff000000 | (a<<16) | (a<<8) | a);
         }
-        String name = id.getNamespace()+"/"+id.getPath()+"_"+Integer.toHexString(tint);
+        // 16 texels per Minecraft pixel (BeamNG filters linearly, and "Low" texture
+        // quality halves textures): crisp mobs and items. _x16 = new files, not BeamNG's
+        // cached conversions of the old 8x ones.
+        int k = Math.max(1, Math.min(16, 4096 / Math.max(w, h)));
+        String name = id.getNamespace()+"/"+id.getPath()+"_"+Integer.toHexString(tint)+"_x"+k;
         Path file = root.resolve(name+".color.png"), opacity = root.resolve(name+"_opacity.data.png");
         Files.createDirectories(file.getParent());
-        GuiExport.write(GuiExport.upscale(image,8), file); GuiExport.write(GuiExport.upscale(mask,8), opacity);
+        GuiExport.write(GuiExport.upscale(image,k), file); GuiExport.write(GuiExport.upscale(mask,k), opacity);
         String url = "/beamcraft/render/"+name;
         Texture result = new Texture(url+".color.png",url+"_opacity.data.png"); cache.put(key,result); return result;
     }

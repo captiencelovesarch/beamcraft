@@ -198,6 +198,8 @@ function M.rebuildCollisionNow()
   local ct = hptimer()
   be:reloadCollision()
   for _, obj in ipairs(visuals) do pcall(function() obj:enableCollision() end) end
+  -- baked: hide the collision boxes again (see rebuildSection)
+  for _,sec in pairs(sections) do if sec.objs[1] then sec.objs[1]:disableCollision() sec.disabled=true end end
   M.lastCollisionMs = ct:stop()
   M.collisionReloads = M.collisionReloads + 1
   if M.onCollisionReloaded then M.onCollisionReloaded() end
@@ -346,7 +348,11 @@ rebuildSection = function(key)
       end
       obj:createMesh({ list })
       if cflag == 0 then obj:enableCollision() end
-      if cflag == 1 then sec.disabled=true end
+      -- The collision boxes (invisible material) are only for be:reloadCollision to
+      -- bake. A fresh mesh draws its alpha-0 material as white boxes for a few frames,
+      -- which washed out the whole section on every placed block; disabled, it isn't
+      -- drawn at all (nor hit by scene raycasts).
+      if cflag == 1 then obj:disableCollision() sec.disabled = true end
     end
   end
   collisionPending = true
