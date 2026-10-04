@@ -42,6 +42,28 @@ local viewport = { w = 0, h = 0 }
 local viewportTimer = 0
 local frames, frameTime = 0, 0
 
+-- Per-subsystem frame cost (ms). beamcraft_main.prof() from the dev console returns
+-- { name = {avg, max, calls} } over the frames since the last call, plus BeamNG's fps.
+local profT = hptimer and hptimer() or nil
+local prof = {}
+local profFrames = 0
+local function pmark(name, t0)
+  local dt = profT:stop() - t0
+  local e = prof[name]
+  if not e then e = { sum = 0, max = 0, n = 0 } prof[name] = e end
+  e.sum, e.n = e.sum + dt, e.n + 1
+  if dt > e.max then e.max = dt end
+  return profT:stop()
+end
+function M.prof()
+  local out = { frames = profFrames, fps = M.fps }
+  for name, e in pairs(prof) do
+    out[name] = string.format('avg %.2f  max %.2f  n %d', e.sum / math.max(1, profFrames), e.max, e.n)
+  end
+  prof, profFrames = {}, 0
+  return out
+end
+
 local ctx = { world = world, iconPath = hud.iconPath, items = items }
 
 local input = {
@@ -518,8 +540,10 @@ end
 local function handle(msg)
   local h = handlers[msg.t]
   if h then
+    local t0 = profT:stop()
     local ok, err = pcall(h, msg)
     if not ok then log('E', 'beamcraft', 'handler ' .. tostring(msg.t) .. ' failed: ' .. tostring(err)) end
+    pmark('msg.' .. tostring(msg.t), t0)
   end
 end
 
@@ -536,6 +560,8 @@ world.onCollisionReloaded = function() terrain.invalidateAll() end
 
 local inputTimer = 0
 local mobGroundTimer = 0
+local mobGroundQueue, mobGroundIdx = {}, 1
+M.mobGroundBudgetMs = 1.5
 local camTimer = 0
 local obstacleTimer = 0
 
@@ -567,7 +593,10 @@ end
 local function onUpdate(dtReal, dtSim, dtRaw)
   now = now + dtReal
   hud.now = now
+  profFrames = profFrames + 1
+  local frameT0 = profT:stop()
   devconsole.update()
+  local t0 = profT:stop()
 
   local msgs = net.update(dtReal, function()
     ready = false
@@ -583,12 +612,17 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     entities.clear()
     particles.clear()
   end)
+  t0 = pmark('net', t0)
   for i = 1, #msgs do handle(msgs[i]) end
+  t0 = profT:stop()
 
   world.update(dtReal)
+  t0 = pmark('world', t0)
   obstacleTimer = obstacleTimer + dtReal
   if obstacleTimer >= 0.1 then obstacleTimer = 0 vehicles.updateObstacles(world, now) end
+  t0 = pmark('obstacles', t0)
   overlay.update(dtReal, active and net.isConnected())
+  t0 = pmark('overlay.update', t0)
 
   frames, frameTime = frames + 1, frameTime + dtReal
   viewportTimer = viewportTimer + dtReal
@@ -610,29 +644,46 @@ local function onUpdate(dtReal, dtSim, dtRaw)
     pushOverlayState()
   end
 
+  t0 = profT:stop()
   local pose = poseNow()
   -- Steve stays visible standing where you left him while you drive
   player.visibleThird = ready and pose ~= nil and not M.inCar and (M.thirdPerson or not active)
   player.visibleFirst = false
   player.updateThird(pose, ctx)
+  t0 = pmark('player', t0)
   entities.showOwn = player.visibleThird
   entities.update(now)
+  t0 = pmark('entities', t0)
   particles.update(now)
+  t0 = pmark('particles', t0)
 
   if net.isConnected() and ready and pose then
     -- ground under the mobs, so they walk on BeamNG's world too (also while you
     -- drive). Rays start 4 m above a mob so one that has sunk into the ground still
     -- finds the real surface (Minecraft then lifts it back on top).
+    -- Every mob is visited about 5 times a second, a few per frame under one shared
+    -- ray budget, instead of all of them in the same frame (a 25-50 ms hitch in fights).
     mobGroundTimer = mobGroundTimer + dtReal
-    if mobGroundTimer > 0.2 then
+    if mobGroundTimer > 0.2 and mobGroundIdx > #mobGroundQueue then
       mobGroundTimer = 0
-      for _, feet in ipairs(entities.mobFeet()) do
-        local mt = terrain.around(feet[1], feet[2], feet[3], 7, 4, 80)
+      mobGroundQueue, mobGroundIdx = entities.mobFeet(), 1
+    end
+    if mobGroundIdx <= #mobGroundQueue then
+      local budget = hptimer()
+      while mobGroundIdx <= #mobGroundQueue do
+        local left = M.mobGroundBudgetMs - budget:stop()
+        if left <= 0 then break end
+        local feet = mobGroundQueue[mobGroundIdx]
+        local mt, incomplete = terrain.around(feet[1], feet[2], feet[3], 7, 4, 80, left)
         if mt then net.send(mt) end
+        if incomplete then break end -- this mob again next frame
+        mobGroundIdx = mobGroundIdx + 1
       end
+      t0 = pmark('mobGround', t0)
     end
     -- cars hitting mobs
     for _, hit in ipairs(vehicles.checkMobHits(now, entities.mobList())) do net.send(hit) end
+    t0 = pmark('mobHits', t0)
     -- away from Steve, Minecraft hears from BeamNG's camera
     camTimer = camTimer + dtReal
     if not active and camTimer > 0.033 then
@@ -649,8 +700,10 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   if active and net.isConnected() and pose then
     local fx, fy, fz = pose.x, pose.y, pose.z
     -- terrain under Steve
+    t0 = profT:stop()
     local ter = terrain.update(fx, fy, fz)
     if ter then net.send(ter) end
+    t0 = pmark('terrain', t0)
 
 
     -- cars: solid to Steve (10 Hz), and they hurt
@@ -678,19 +731,24 @@ local function onUpdate(dtReal, dtSim, dtRaw)
       }
       if #events > 0 then msg.ev = events events = {} end
       -- where the crosshair meets BeamNG's world, for placing blocks on the ground
+      t0 = pmark('vehicles', t0)
       local eye, dir = lookRay()
       if eye then
         local aim = terrain.aim(eye, dir, 6)
         if aim then msg.aim = aim end
       end
       net.send(msg)
+      t0 = pmark('aim', t0)
     end
     drawTarget()
   end
 
+  t0 = profT:stop()
   updateWarm()
   if active then overlay.draw() end
   hud.drawStatus(statusLines())
+  pmark('overlay.draw', t0)
+  pmark('TOTAL', frameT0)
 end
 
 local function onExtensionLoaded()
@@ -759,6 +817,7 @@ M.net = net
 M.hud = hud
 M.player = player
 M.entities = entities
+M.particlesMod = particles
 M.vehicles = vehicles
 M.meshutil = mu
 

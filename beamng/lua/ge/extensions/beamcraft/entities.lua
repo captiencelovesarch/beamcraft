@@ -49,16 +49,77 @@ local function partMesh(quads, material)
   return m
 end
 
--- one model layer (body, wool, armour...) -> { [partIndex] = ProceduralMesh }
-local function layerObjects(info)
+-- Part objects of mobs that died or changed layers wait here for the next mob of the
+-- same look: making one costs ~0.7 ms (a zombie in armour is 20+ objects), so fights
+-- that spawn and kill mobs constantly used to hitch on every spawn.
+local spare = {}       -- layer key -> { { parts = {...}, at = time }, ... }
+local SPARE_MAX = 6    -- kept per look
+local SPARE_TTL = 60   -- seconds an unused set is kept
+-- new part objects per frame; mobs over budget appear a tick or two later
+M.createBudgetMs = 3.0
+local frameNow, createdMs = -1, 0
+local createTimer = hptimer()
+
+local function hideParts(parts)
+  for _, o in pairs(parts) do mu.setXform(o, 0, 0, HIDE, mu.IDENTITY) end
+end
+local function setParked(parts, parked)
+  for _, o in pairs(parts) do if parked then mu.park(o) else mu.unpark(o) end end
+end
+
+local function releaseLayer(layer, now)
+  if not layer.lkey or not layer.parts then return end
+  hideParts(layer.parts)
+  local list = spare[layer.lkey]
+  if not list then list = {} spare[layer.lkey] = list end
+  if #list >= SPARE_MAX then
+    for _, o in pairs(layer.parts) do mu.deleteObject(o) end
+  else
+    setParked(layer.parts, true)
+    list[#list + 1] = { parts = layer.parts, at = now or 0 }
+  end
+  layer.parts = nil
+end
+
+local function trimSpare(now)
+  for key, list in pairs(spare) do
+    for i = #list, 1, -1 do
+      if now - list[i].at > SPARE_TTL then
+        for _, o in pairs(list[i].parts) do mu.deleteObject(o) end
+        table.remove(list, i)
+      end
+    end
+    if #list == 0 then spare[key] = nil end
+  end
+end
+
+local function layerKey(info) return info.k .. '|' .. info.tx end
+
+-- one model layer (body, wool, armour...) -> { [partIndex] = ProceduralMesh }, or nil
+-- (no geometry yet, or over this frame's budget)
+local function layerObjects(info, now)
+  local list = spare[layerKey(info)]
+  if list and #list > 0 then
+    local parts = table.remove(list).parts
+    setParked(parts, false)
+    return parts
+  end
   local model = models[info.k]
   if not model then return nil end
+  if frameNow ~= now then frameNow, createdMs = now, 0 end
+  if createdMs >= M.createBudgetMs then return nil end
+  local t0 = createTimer:stop()
   local mat = mu.textureMaterial('bc_mob_' .. info.tx:gsub('[^%w]', '_'), info.tx, 'cutout', nil, info.mk, true)
   mu.flushMaterials()
   local parts = {}
   for i, quads in ipairs(model.parts) do
-    if #quads > 0 then parts[i - 1] = mu.newObject('beamcraft_mob', { partMesh(quads, mat) }) end
+    if #quads > 0 then
+      local o = mu.newObject('beamcraft_mob', { partMesh(quads, mat) })
+      mu.setXform(o, 0, 0, HIDE, mu.IDENTITY)
+      parts[i - 1] = o
+    end
   end
+  createdMs = createdMs + (createTimer:stop() - t0)
   return parts
 end
 
@@ -91,23 +152,36 @@ function M.snapshot(msg, now, ctx)
       key = kind .. ':' .. tostring(e[9])
     end
     if ent and ent.key ~= key then
-      M.deleteEnt(ent)
-      ent = nil
+      if mob and ent.layers then
+        -- same mob, layers changed (armour on/off, wither armour, sheared...): keep
+        -- the layers that are still there
+        ent.key = key
+      else
+        M.deleteEnt(ent, now)
+        ent = nil
+      end
     end
     if not ent then
       ent = { kind = kind, key = key, extra = e[9], cur = { e[3], e[4], e[5] } }
       ents[id] = ent
     end
     if mob then
-      if not ent.layers then
-        ent.layers = {}
-        for i, l in ipairs(mob) do ent.layers[i] = { parts = layerObjects(l) or {} } end
-      end
+      local old = ent.layers or {}
+      local layers = {}
       for i, l in ipairs(mob) do
-        local layer = ent.layers[i]
-        layer.prev = layer.pose
+        local lk = layerKey(l)
+        local layer
+        for j, o in pairs(old) do
+          if o.lkey == lk then layer = o old[j] = nil break end
+        end
+        if not layer then layer = { lkey = lk } end
+        if not layer.parts then layer.parts = layerObjects(l, now) end
+        layer.prev = layer.parts and layer.pose or nil
         layer.pose = parsePose(l.p)
+        layers[i] = layer
       end
+      for _, o in pairs(old) do releaseLayer(o, now) end
+      ent.layers = layers
     elseif not ent.obj then
       ent.obj = M.makeObject(kind, e[9], ctx)
     end
@@ -120,21 +194,27 @@ function M.snapshot(msg, now, ctx)
   end
   for id, ent in pairs(ents) do
     if ent.seen ~= stamp then
-      M.deleteEnt(ent)
+      M.deleteEnt(ent, now)
       ents[id] = nil
     end
   end
+  trimSpare(now)
 end
 
-function M.deleteEnt(ent)
+-- now = keep mob parts for reuse; nil = really delete them (clear)
+function M.deleteEnt(ent, now)
   mu.deleteObject(ent.obj)
   for _, layer in pairs(ent.layers or {}) do
-    for _, o in pairs(layer.parts) do mu.deleteObject(o) end
+    if now then releaseLayer(layer, now)
+    elseif layer.parts then
+      for _, o in pairs(layer.parts) do mu.deleteObject(o) end
+    end
   end
   ent.obj, ent.layers = nil, nil
 end
 
 local function placeParts(layer, a, x, y, z)
+  if not layer.parts then return end
   local pose, prev = layer.pose or {}, layer.prev or layer.pose or {}
   for idx, obj in pairs(layer.parts) do
     local c = pose[idx]
@@ -205,7 +285,7 @@ function M.update(now, camPos)
       local show = ent.kind ~= 'w' or M.showOwn
       for _, layer in ipairs(ent.layers) do
         if show then placeParts(layer, a, x, y, z)
-        else for _, o in pairs(layer.parts) do mu.setXform(o, 0, 0, HIDE, mu.IDENTITY) end end
+        elseif layer.parts then hideParts(layer.parts) end
       end
     elseif ent.obj then
       if ent.kind == 'x' then
@@ -235,6 +315,12 @@ end
 function M.clear()
   for id, ent in pairs(ents) do M.deleteEnt(ent) end
   ents = {}
+  for _, list in pairs(spare) do
+    for _, set in ipairs(list) do
+      for _, o in pairs(set.parts) do mu.deleteObject(o) end
+    end
+  end
+  spare = {}
 end
 
 -- mobs (and other modelled entities) for car hits: { id, x, y, z (MC feet), w, h }

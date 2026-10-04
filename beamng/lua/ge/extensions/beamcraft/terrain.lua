@@ -22,7 +22,13 @@ M.sampleBudgetMs = 2.5
 
 local NONE = -100000  -- sentinel: nothing under this column
 
-local cache = {}      -- [key] = { h = mcY or NONE, at = feetY when sampled }
+-- [key] = { h = mcY or NONE, top = where the ray started }. A ray finds the first
+-- surface below its start, so the answer holds for any later ray starting lower but
+-- still above h: falling, hovering and knocked-back mobs reuse it. Only a start more
+-- than a resample delta higher (a bridge or ledge could be up there) or below the
+-- found surface (under a bridge) casts again. Keying on the exact height instead made
+-- a blaze or a wither re-cast hundreds of columns 5 times a second.
+local cache = {}
 local outBatch = {}
 M.raysLastFrame = 0
 
@@ -46,12 +52,13 @@ function M.invalidateBlock(x, y, z)
 end
 
 function M.invalidateAll()
-  for key, c in pairs(cache) do c.at = -1e9 end
+  for key, c in pairs(cache) do c.top = -1e9 end
   M.incomplete = true
 end
 
--- feetX/Y/Z in Minecraft coordinates. Returns a message table or nil.
-local function sample(feetX, feetY, feetZ, radius, above, reach)
+-- feetX/Y/Z in Minecraft coordinates. Returns a message table or nil, and whether
+-- the ray budget ran out before every column was fresh.
+local function sample(feetX, feetY, feetZ, radius, above, reach, budgetMs)
   local r = M.res
   local rad = radius or M.radius
   above, reach = above or M.above, reach or M.reach
@@ -59,6 +66,8 @@ local function sample(feetX, feetY, feetZ, radius, above, reach)
   local n = math.ceil(rad / r)
   local rays = 0
   local timer = hptimer()
+  local incomplete = false
+  budgetMs = budgetMs or M.sampleBudgetMs
   local out = outBatch
   local cnt = 0
   table.clear(out)
@@ -70,22 +79,22 @@ local function sample(feetX, feetY, feetZ, radius, above, reach)
         local key = colKey(i, k)
         local c = cache[key]
         local delta = (di * di + dk * dk) * r * r <= M.nearRadius * M.nearRadius and M.resampleDelta or M.farResampleDelta
-        if not c or math.abs(c.at - feetY) > delta then
-          if rays >= M.maxRaysPerFrame or (rays > 0 and timer:stop() >= M.sampleBudgetMs) then
-            M.incomplete = true
+        local startZ = feetY + above
+        if not c or startZ > c.top + delta or startZ <= c.h then
+          if rays >= M.maxRaysPerFrame or (rays > 0 and timer:stop() >= budgetMs) then
+            incomplete = true
             goto continue
           end
           rays = rays + 1
           local cx, cz = (i + 0.5) * r, (k + 0.5) * r
           local bx, by = cx, -cz
-          local startZ = feetY + above
           origin:set(bx, by, startZ)
           local hit = Engine.castRay(origin, origin + down * reach, true, false)
           local d = hit and hit.dist
           local h = NONE
           if d and d < reach then h = startZ - d end
           if not c then c = {} cache[key] = c end
-          c.h, c.at = h, feetY
+          c.h, c.top = h, startZ
           out[cnt + 1], out[cnt + 2], out[cnt + 3] = i, k, h
           cnt = cnt + 3
         end
@@ -94,10 +103,10 @@ local function sample(feetX, feetY, feetZ, radius, above, reach)
     end
   end
   M.raysLastFrame = rays
-  if cnt == 0 then return nil end
+  if cnt == 0 then return nil, incomplete end
   local list = {}
   for j = 1, cnt do list[j] = out[j] end
-  return { t = 'ter', r = r, c = list }
+  return { t = 'ter', r = r, c = list }, incomplete
 end
 
 -- Steve's sweep walks ~2500 cached columns: skip it while he hasn't moved a column
@@ -108,15 +117,23 @@ function M.update(x,y,z)
   if not M.incomplete and last.ci == ci and last.ck == ck and last.y and math.abs(last.y - y) < 0.2 then return nil end
   M.incomplete = false
   last.ci, last.ck, last.y = ci, ck, y
-  if M.withoutBlocks then return M.withoutBlocks(function() return sample(x,y,z) end) end
-  return sample(x,y,z)
+  local msg, incomplete
+  if M.withoutBlocks then
+    M.withoutBlocks(function() msg, incomplete = sample(x, y, z) end)
+  else
+    msg, incomplete = sample(x, y, z)
+  end
+  if incomplete then M.incomplete = true end
+  return msg
 end
 
--- ground around a mob (or a spot Minecraft wants to spawn one at), MC coords
-function M.around(x, y, z, radius, above, reach)
-  local f = function() return sample(x, y, z, radius, above, reach) end
-  if M.withoutBlocks then return M.withoutBlocks(f) end
-  return f()
+-- ground around a mob (or a spot Minecraft wants to spawn one at), MC coords.
+-- Returns the message (or nil) and whether the ray budget ran out.
+function M.around(x, y, z, radius, above, reach, budgetMs)
+  local msg, incomplete
+  local f = function() msg, incomplete = sample(x, y, z, radius, above, reach, budgetMs) end
+  if M.withoutBlocks then M.withoutBlocks(f) else f() end
+  return msg, incomplete
 end
 
 -- Where the crosshair meets BeamNG's world (MC coords), for placing blocks on the

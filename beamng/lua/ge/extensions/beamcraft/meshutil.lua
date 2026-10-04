@@ -183,13 +183,23 @@ end
 
 -- Every object made here is a visual (Steve, mobs, items, particles): never part of
 -- BeamNG's static collision. A collision rebuild bakes whatever has collision into
--- solid walls where it stood - a dropped feather stopped a car dead. World code
--- switches these off around rebuilds and its own raycasts (M.eachVisual).
+-- solid walls where it stood - a dropped feather stopped a car dead - and scene
+-- raycasts would hit them. World code switches their collision off around rebuilds
+-- and its own raycasts (M.eachVisual). It can't stay off: a ProceduralMesh with
+-- collision disabled isn't drawn either.
+-- Parked objects (pooled particles, spare mob parts, all far below the map) are
+-- skipped: toggling every pooled object cost over a millisecond per raycast batch.
 M.visuals = setmetatable({}, { __mode = 'k' })
+M.parked = setmetatable({}, { __mode = 'k' })
+function M.park(obj) M.parked[obj] = true end
+function M.unpark(obj) M.parked[obj] = nil end
 function M.eachVisual(fn)
+  local parked = M.parked
   for obj in pairs(M.visuals) do
-    local ok = pcall(fn, obj)
-    if not ok then M.visuals[obj] = nil end
+    if not parked[obj] then
+      local ok = pcall(fn, obj)
+      if not ok then M.visuals[obj] = nil end
+    end
   end
 end
 
@@ -211,6 +221,7 @@ end
 function M.deleteObject(obj)
   if obj then
     M.visuals[obj] = nil
+    M.parked[obj] = nil
     pcall(function() obj:delete() end)
   end
 end

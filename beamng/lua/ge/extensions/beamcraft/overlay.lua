@@ -13,6 +13,12 @@
 --
 -- Pull model: each byte we send asks for one frame ('F' = whole frame). Two requests
 -- may be in flight, so the next frame is usually already rendered when we want it.
+--
+-- Loading a tile costs ~0.3 ms, and some frames change dozens: an enchanted item's
+-- glint in first person redraws ~50 tiles every frame (39 fps vs 109 in third
+-- person). Tiles now load into each cell's back texture under a per-frame budget and
+-- the finished frame swaps in at once (no torn hand); new frames are only requested
+-- once the staged one is shown, so heavy churn slows the overlay, not the game.
 
 local socket = require('socket.socket')
 local sbuf = require('string.buffer')
@@ -36,7 +42,12 @@ local waitTime = 0
 local wantFull = false
 
 local grid = { w = 0, h = 0, t = 128 }
-local tiles = {}   -- [ty * 4096 + tx] = { tex =, id =, x =, y = }
+local tiles = {}   -- [ty * 4096 + tx] = { tex =, back =, id =, x =, y = }
+-- the frame being loaded: [key] = { tx, ty, name or '-', loaded }; merged when more
+-- frames arrive before it's shown (the newest file per cell wins)
+local staged, stagedCount, stagedFull = {}, 0, false
+M.loadBudgetMs = 3.0
+local loadTimer = hptimer()
 
 local white = 0xFFFFFFFF
 
@@ -45,6 +56,7 @@ local white = 0xFFFFFFFF
 -- collector, which released them all at once in 50-80 ms hitches.
 local function clearTiles()
   for _, tile in pairs(tiles) do tile.shown = false end
+  staged, stagedCount, stagedFull = {}, 0, false
 end
 M.clear = clearTiles
 
@@ -92,36 +104,73 @@ local function applyFrame(msg)
       local w, h, t, full = part:match('^(%d+),(%d+),(%d+),(%d)$')
       if not w then return end
       w, h, t = tonumber(w), tonumber(h), tonumber(t)
-      if full == '1' or w ~= grid.w or h ~= grid.h or t ~= grid.t then clearTiles() end
+      if w ~= grid.w or h ~= grid.h or t ~= grid.t then clearTiles() end
+      -- a full frame replaces everything: cells it doesn't list go blank on swap
+      if full == '1' then staged, stagedCount, stagedFull = {}, 0, true end
       grid.w, grid.h, grid.t = w, h, t
     else
       local tx, ty, name = part:match('^(%d+),(%d+),(.+)$')
       if tx then
         tx, ty = tonumber(tx), tonumber(ty)
         local key = ty * 4096 + tx
-        local tile = tiles[key]
-        if name == '-' then
-          if tile then tile.shown = false end
-        else
-          if not tile then
-            tile = { tex = im.ImTextureHandler(DIR .. name), x = tx, y = ty }
-            tiles[key] = tile
-          else
-            tile.tex:setID(DIR .. name)
-          end
-          local size = tile.tex:getSize()
-          if size and size.x > 0 then
-            tile.id, tile.w, tile.h, tile.shown = tile.tex:getID(), size.x, size.y, true
-            M.tilesLoaded = M.tilesLoaded + 1
-          else
-            -- the file is gone (we stalled longer than Minecraft keeps them)
-            tile.shown = false
-            okAll = false
-          end
+        local s = staged[key]
+        if not s then
+          s = {}
+          staged[key] = s
+          stagedCount = stagedCount + 1
         end
+        s.tx, s.ty, s.name, s.loaded = tx, ty, name, name == '-'
       end
     end
   end
+end
+
+-- load staged tiles into back textures; true once every staged tile is loaded
+local function loadStaged()
+  local start = loadTimer:stop()
+  for key, s in pairs(staged) do
+    if not s.loaded then
+      if loadTimer:stop() - start >= M.loadBudgetMs then return false end
+      local tile = tiles[key]
+      if not tile then
+        tile = { x = s.tx, y = s.ty }
+        tiles[key] = tile
+      end
+      if not tile.back then
+        tile.back = im.ImTextureHandler(DIR .. s.name)
+      else
+        tile.back:setID(DIR .. s.name)
+      end
+      local size = tile.back:getSize()
+      s.loaded = true
+      s.ok = size and size.x > 0
+      s.w, s.h = s.ok and size.x or 0, s.ok and size.y or 0
+      M.tilesLoaded = M.tilesLoaded + 1
+    end
+  end
+  return true
+end
+
+-- show the staged frame: swap every loaded back texture to the front
+local function swapStaged()
+  if stagedFull then
+    for key, tile in pairs(tiles) do if not staged[key] then tile.shown = false end end
+  end
+  local okAll = true
+  for key, s in pairs(staged) do
+    local tile = tiles[key]
+    if s.name == '-' then
+      if tile then tile.shown = false end
+    elseif s.ok then
+      tile.tex, tile.back = tile.back, tile.tex
+      tile.id, tile.w, tile.h, tile.shown = tile.tex:getID(), s.w, s.h, true
+    else
+      -- the file is gone (we stalled longer than Minecraft keeps them)
+      tile.shown = false
+      okAll = false
+    end
+  end
+  staged, stagedCount, stagedFull = {}, 0, false
   if not okAll then wantFull = true end
 end
 
@@ -164,12 +213,16 @@ function M.update(dt, enabled)
     applyFrame(msg)
   end
 
+  local ready = loadStaged()
+  if ready and (stagedCount > 0 or stagedFull) then swapStaged() end
+
   -- recover if a request got lost
   if pending > 0 then
     waitTime = waitTime + dt
     if waitTime > 0.5 then pending, waitTime = 0, 0 end
   end
-  while sock and pending < WINDOW do
+  -- ask for more only once the staged frame is up (Minecraft renders ahead otherwise)
+  while sock and pending < WINDOW and stagedCount == 0 do
     local sent = sock:send(wantFull and 'F' or 'N')
     if not sent then close() return end
     wantFull = false
